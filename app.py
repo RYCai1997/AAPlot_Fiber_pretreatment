@@ -70,7 +70,7 @@ class FitWindow:
         self.channel, self.config, self.on_accept = channel, config, on_accept
         self.markers = [dict(marker) for marker in markers]
         self.window = tk.Toplevel(parent)
-        self.window.title(f"{channel} fitting regions")
+        self.window.title(f"{channel} Fitting Regions")
         self.window.geometry("1200x760")
         subset = select_effective_data(data, config)
         self.time_s = subset["TimeStamp"].to_numpy(float) / 1000
@@ -105,23 +105,23 @@ class FitWindow:
         left, right = ttk.Frame(pane, padding=8, width=270), ttk.Frame(pane)
         pane.add(left, weight=0); pane.add(right, weight=1)
         ttk.Label(left, text=f"{channel} nm", font=("Segoe UI", 12, "bold")).pack(anchor="w")
-        ttk.Label(left, text=f"User baseline: {self.baseline:g}", justify="left").pack(anchor="w", pady=(2, 5))
-        ttk.Label(left, text="Fitting model").pack(anchor="w")
+        ttk.Label(left, text=f"Fitting baseline: {self.baseline:g}", justify="left").pack(anchor="w", pady=(2, 5))
+        ttk.Label(left, text="Bleaching model").pack(anchor="w")
         self.model_box = ttk.Combobox(
             left, textvariable=self.model_var,
             values=["linear", "single_exponential", "double_exponential"], state="readonly",
         )
         self.model_box.pack(fill=tk.X, pady=(0, 7))
         self.model_box.bind("<<ComboboxSelected>>", self.invalidate_preview)
-        ttk.Label(left, text="Baseline: initial value for a freely fitted constant (fit_constant)",
+        ttk.Label(left, text="The baseline initializes the freely fitted constant (fit_constant).",
                   wraplength=250).pack(anchor="w", pady=(0, 5))
-        ttk.Button(left, text="Add region", command=self.add_region).pack(fill=tk.X, pady=2)
-        ttk.Button(left, text="Delete selected region", command=self.delete_region).pack(fill=tk.X, pady=2)
+        ttk.Button(left, text="Add Region", command=self.add_region).pack(fill=tk.X, pady=2)
+        ttk.Button(left, text="Delete Selected Region", command=self.delete_region).pack(fill=tk.X, pady=2)
         self.region_list = tk.Listbox(left, height=12, exportselection=False)
         self.region_list.pack(fill=tk.BOTH, expand=True, pady=6)
         self.region_list.bind("<<ListboxSelect>>", self.list_selection_changed)
-        ttk.Button(left, text="Preview fit", command=self.preview_fit).pack(fill=tk.X, pady=2)
-        ttk.Button(left, text="Confirm and save regions", command=self.accept).pack(fill=tk.X, pady=2)
+        ttk.Button(left, text="Preview Fit", command=self.preview_fit).pack(fill=tk.X, pady=2)
+        ttk.Button(left, text="Use These Regions", command=self.accept, style="Accent.TButton").pack(fill=tk.X, pady=2)
         ttk.Label(left, textvariable=self.readout, wraplength=250).pack(anchor="w", pady=(8, 0))
 
         self.figure = Figure(figsize=(9, 7), dpi=100, constrained_layout=True)
@@ -131,11 +131,11 @@ class FitWindow:
         toolbar.update(); toolbar.pack(fill=tk.X)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
         fit_footer = ttk.Frame(right, padding=(8, 4)); fit_footer.pack(fill=tk.X)
-        ttk.Label(fit_footer, text="Signal width").pack(side=tk.LEFT)
+        ttk.Label(fit_footer, text="Signal Width").pack(side=tk.LEFT)
         ttk.Scale(fit_footer, from_=0.4, to=3.0, variable=self.signal_width_var,
                   command=lambda _value: self.fit_line_width_changed(), length=150).pack(side=tk.LEFT, padx=6)
         ttk.Label(fit_footer, textvariable=self.signal_width_text, width=4).pack(side=tk.LEFT)
-        ttk.Label(fit_footer, text="Fit width").pack(side=tk.LEFT, padx=(16, 0))
+        ttk.Label(fit_footer, text="Fit Width").pack(side=tk.LEFT, padx=(16, 0))
         ttk.Scale(fit_footer, from_=0.4, to=3.0, variable=self.fit_width_var,
                   command=lambda _value: self.fit_line_width_changed(), length=150).pack(side=tk.LEFT, padx=6)
         ttk.Label(fit_footer, textvariable=self.fit_width_text, width=4).pack(side=tk.LEFT)
@@ -384,7 +384,7 @@ class PretreatmentApp:
 
         self.tk, self.ttk, self.root = tk, ttk, root
         self.RectangleSelector = RectangleSelector
-        root.title("RWD Fiber Pretreatment")
+        root.title("RWD Fiber Pretreatment — Fiber Photometry")
         root.geometry("1650x950")
         root.minsize(1120, 720)
         self.folder: Path | None = None
@@ -440,46 +440,79 @@ class PretreatmentApp:
             "zscore_csv": tk.BooleanVar(value=True), "zscore_png": tk.BooleanVar(value=True),
         }
 
+        palette = {
+            "window": "#eef2f5", "panel": "#f7f9fb", "accent": "#2f6f9f",
+            "accent_active": "#255d86", "text": "#263746", "muted": "#657786",
+            "tab": "#dfe7ee", "border": "#ccd6df",
+        }
+        root.configure(background=palette["window"])
         style = ttk.Style(root)
         if "clam" in style.theme_names():
             style.theme_use("clam")
-        style.configure("TNotebook.Tab", padding=(14, 7))
+        style.configure("TFrame", background=palette["panel"])
+        style.configure("TLabel", background=palette["panel"], foreground=palette["text"], font=("Segoe UI", 9))
+        style.configure("TCheckbutton", background=palette["panel"], foreground=palette["text"], font=("Segoe UI", 9))
+        style.configure("TRadiobutton", background=palette["panel"], foreground=palette["text"], font=("Segoe UI", 9))
+        style.configure("TNotebook", background=palette["window"], borderwidth=0)
+        style.configure("TNotebook.Tab", background=palette["tab"], foreground=palette["muted"],
+                        font=("Segoe UI", 9, "bold"), padding=(14, 8))
+        style.map("TNotebook.Tab",
+                  background=[("selected", palette["panel"]), ("active", "#e9eef3")],
+                  foreground=[("selected", palette["accent"]), ("active", palette["text"])])
         style.configure("TLabelframe", padding=8)
         style.configure("TLabelframe.Label", font=("Segoe UI", 10, "bold"))
-        style.configure("Accent.TButton", font=("Segoe UI", 10, "bold"), padding=(8, 6))
+        style.configure("TButton", font=("Segoe UI", 9), padding=(7, 4))
+        style.configure("Accent.TButton", background=palette["accent"], foreground="white",
+                        font=("Segoe UI", 10, "bold"), padding=(9, 7), borderwidth=0)
+        style.map("Accent.TButton", background=[("active", palette["accent_active"]),
+                                                ("pressed", palette["accent_active"]),
+                                                ("disabled", "#9eb4c5")])
+        style.configure("TEntry", padding=4, fieldbackground="white")
+        style.configure("TCombobox", padding=3, fieldbackground="white")
+        style.configure("Section.TLabel", foreground=palette["accent"],
+                        font=("Segoe UI", 10, "bold"), padding=(0, 2))
+        style.configure("Hint.TLabel", foreground=palette["muted"], font=("Segoe UI", 8))
+        style.configure("Status.TLabel", foreground=palette["accent"], font=("Segoe UI", 9, "bold"))
+        style.configure("HeaderTitle.TLabel", foreground=palette["text"], font=("Segoe UI", 15, "bold"))
+        style.configure("HeaderSubtitle.TLabel", foreground=palette["muted"], font=("Segoe UI", 9))
 
-        pane = ttk.Panedwindow(root, orient=tk.HORIZONTAL); pane.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
-        controls, plot_frame = ttk.Frame(pane, width=390), ttk.Frame(pane)
+        pane = ttk.Panedwindow(root, orient=tk.HORIZONTAL); pane.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        controls, plot_frame = ttk.Frame(pane, width=430), ttk.Frame(pane)
         pane.add(controls, weight=0); pane.add(plot_frame, weight=1)
+        header = ttk.Frame(controls, padding=(12, 8))
+        header.pack(fill=tk.X, pady=(0, 6))
+        ttk.Label(header, text="RWD Fiber Pretreatment", style="HeaderTitle.TLabel").pack(anchor="w")
+        ttk.Label(header, text="Fiber photometry correction, normalization, and export",
+                  style="HeaderSubtitle.TLabel").pack(anchor="w", pady=(1, 0))
         notebook = ttk.Notebook(controls)
         notebook.pack(fill=tk.BOTH, expand=True)
-        data_tab, display_tab, export_tab = ttk.Frame(notebook, padding=10), ttk.Frame(notebook, padding=10), ttk.Frame(notebook, padding=10)
+        data_tab, display_tab, export_tab = ttk.Frame(notebook, padding=12), ttk.Frame(notebook, padding=12), ttk.Frame(notebook, padding=12)
         notebook.add(data_tab, text="Data & Fitting")
-        notebook.add(display_tab, text="Display & Normalization")
-        notebook.add(export_tab, text="Export")
+        notebook.add(display_tab, text="dF/F0 & Z-score")
+        notebook.add(export_tab, text="Export Results")
 
         row = 0
         ttk.Button(data_tab, text="Select Recording Folder", command=self.open_folder, style="Accent.TButton").grid(row=row, column=0, columnspan=2, sticky="ew"); row += 1
         ttk.Label(data_tab, textvariable=self.vars["folder"], wraplength=350).grid(row=row, column=0, columnspan=2, sticky="w", pady=(3, 9)); row += 1
         row = self.section(data_tab, row, "Valid Data Range (min)")
         row = self.entry(data_tab, row, "Start", "range_start"); row = self.entry(data_tab, row, "End", "range_end")
-        row = self.section(data_tab, row, "User-Defined Parameters")
-        for label, key in [("410 offset", "offset410"), ("470 offset", "offset470"),
-                           ("410 baseline", "baseline410"), ("470 baseline", "baseline470")]:
+        row = self.section(data_tab, row, "Offsets & Fitting Baselines")
+        for label, key in [("410 Offset", "offset410"), ("470 Offset", "offset470"),
+                           ("410 Fitting Baseline", "baseline410"), ("470 Fitting Baseline", "baseline470")]:
             row = self.entry(data_tab, row, label, key)
-        row = self.section(data_tab, row, "Correction Method")
+        row = self.section(data_tab, row, "Bleaching Correction")
         ttk.Radiobutton(data_tab, text="Fit 410 and 470 separately", variable=self.vars["method"], value="fit_both", command=self.method_changed).grid(row=row, column=0, columnspan=2, sticky="w"); row += 1
         ttk.Radiobutton(data_tab, text="Fit 470 only", variable=self.vars["method"], value="fit_470_only", command=self.method_changed).grid(row=row, column=0, columnspan=2, sticky="w"); row += 1
-        ttk.Label(data_tab, text="Combination").grid(row=row, column=0, sticky="w")
+        ttk.Label(data_tab, text="Combine Channels").grid(row=row, column=0, sticky="w")
         self.combine_box = ttk.Combobox(data_tab, textvariable=self.vars["combine"], values=["ratio", "subtraction"], state="readonly", width=19)
         self.combine_box.grid(row=row, column=1, sticky="ew"); row += 1
-        ttk.Button(data_tab, text="Open 470 Fitting Window", command=lambda: self.open_fit("470")).grid(row=row, column=0, sticky="ew", pady=2)
+        ttk.Button(data_tab, text="Configure 470 Fit...", command=lambda: self.open_fit("470")).grid(row=row, column=0, sticky="ew", pady=2)
         ttk.Label(data_tab, textvariable=self.vars["fit470_status"], wraplength=180).grid(row=row, column=1, sticky="w"); row += 1
-        self.fit410_button = ttk.Button(data_tab, text="Open 410 Fitting Window", command=lambda: self.open_fit("410"))
+        self.fit410_button = ttk.Button(data_tab, text="Configure 410 Fit...", command=lambda: self.open_fit("410"))
         self.fit410_button.grid(row=row, column=0, sticky="ew", pady=2)
         ttk.Label(data_tab, textvariable=self.vars["fit410_status"], wraplength=180).grid(row=row, column=1, sticky="w"); row += 1
-        ttk.Button(data_tab, text="Apply Fit and Update Traces", command=self.apply_processing, style="Accent.TButton").grid(row=row, column=0, columnspan=2, sticky="ew", pady=(7, 2)); row += 1
-        row = self.section(data_tab, row, "Marker Working Copy")
+        ttk.Button(data_tab, text="Apply Correction", command=self.apply_processing, style="Accent.TButton").grid(row=row, column=0, columnspan=2, sticky="ew", pady=(8, 3)); row += 1
+        row = self.section(data_tab, row, "Markers (Working Copy)")
         self.marker_list = tk.Listbox(data_tab, height=5, exportselection=False, relief="flat", highlightthickness=1)
         self.marker_list.grid(row=row, column=0, columnspan=2, sticky="nsew", pady=(2, 5)); row += 1
         row = self.entry(data_tab, row, "Time (min)", "marker_time"); row = self.entry(data_tab, row, "Name", "marker_name")
@@ -489,55 +522,57 @@ class PretreatmentApp:
         data_tab.columnconfigure(1, weight=1)
 
         row = 0
-        row = self.section(display_tab, row, "Fluorescence Trace Layers")
+        row = self.section(display_tab, row, "Trace Display")
         layer_row = ttk.Frame(display_tab); layer_row.grid(row=row, column=0, columnspan=2, sticky="w"); row += 1
         for text, value in [("Raw + Corrected", "overlay"), ("Raw Only", "raw_only"), ("Corrected Only", "corrected_only")]:
             ttk.Radiobutton(layer_row, text=text, variable=self.trace_view_var, value=value,
                             command=self.redraw_current).pack(side=tk.LEFT)
-        ttk.Checkbutton(display_tab, text="Show fitted curve (red dashed line)", variable=self.show_fit_var,
+        ttk.Checkbutton(display_tab, text="Show Fitted Curves (red dashed)", variable=self.show_fit_var,
                         command=self.redraw_current).grid(row=row, column=0, columnspan=2, sticky="w"); row += 1
-        row = self.section(display_tab, row, "Smooth / Downsample (Applied on Demand)")
-        ttk.Checkbutton(display_tab, text="Enable Smooth", variable=self.smooth_enabled_var).grid(row=row, column=0, sticky="w")
-        ttk.Entry(display_tab, textvariable=self.vars["smooth"], width=10).grid(row=row, column=1, sticky="ew"); row += 1
-        ttk.Label(display_tab, text="Smooth Window (s)").grid(row=row, column=0, columnspan=2, sticky="w"); row += 1
-        ttk.Checkbutton(display_tab, text="Enable Downsample", variable=self.downsample_enabled_var).grid(row=row, column=0, sticky="w")
+        row = self.section(display_tab, row, "Smoothing & Downsampling")
+        ttk.Checkbutton(display_tab, text="Enable Smoothing", variable=self.smooth_enabled_var).grid(
+            row=row, column=0, columnspan=2, sticky="w"); row += 1
+        row = self.entry(display_tab, row, "Smoothing Window (s)", "smooth")
+        ttk.Checkbutton(display_tab, text="Enable Downsampling", variable=self.downsample_enabled_var).grid(
+            row=row, column=0, columnspan=2, sticky="w"); row += 1
+        ttk.Label(display_tab, text="Downsampling Unit").grid(row=row, column=0, sticky="w")
         ttk.Combobox(display_tab, textvariable=self.downsample_mode_var, values=["points", "seconds"],
                      state="readonly", width=10).grid(row=row, column=1, sticky="ew"); row += 1
-        row = self.entry(display_tab, row, "Downsample Interval", "downsample_value")
-        ttk.Button(display_tab, text="Apply Smooth / Downsample", command=self.display_settings_changed).grid(
+        row = self.entry(display_tab, row, "Interval / Step", "downsample_value")
+        ttk.Button(display_tab, text="Apply Display Processing", command=self.display_settings_changed).grid(
             row=row, column=0, columnspan=2, sticky="ew", pady=(2, 4)); row += 1
-        row = self.section(display_tab, row, "dF/F0 and Z-score Baseline")
+        row = self.section(display_tab, row, "Normalization Baseline")
         baseline_modes = ttk.Frame(display_tab); baseline_modes.grid(row=row, column=0, columnspan=2, sticky="w"); row += 1
         ttk.Radiobutton(baseline_modes, text="Manual", variable=self.norm_mode_var,
                         value="manual").pack(side=tk.LEFT)
         ttk.Radiobutton(baseline_modes, text="Pre-Marker Interval", variable=self.norm_mode_var,
                         value="marker_before").pack(side=tk.LEFT)
-        row = self.entry(display_tab, row, "Manual Start (original min)", "norm_start")
-        row = self.entry(display_tab, row, "Manual End (original min)", "norm_end")
+        row = self.entry(display_tab, row, "Baseline Start (original min)", "norm_start")
+        row = self.entry(display_tab, row, "Baseline End (original min)", "norm_end")
         ttk.Label(display_tab, text="Baseline Marker").grid(row=row, column=0, sticky="w")
         self.norm_marker_box = ttk.Combobox(display_tab, textvariable=self.norm_marker_var,
                                             state="readonly", width=20)
         self.norm_marker_box.grid(row=row, column=1, sticky="ew"); row += 1
         row = self.entry(display_tab, row, "Pre-Marker Duration (min)", "norm_pre_duration")
-        row = self.section(display_tab, row, "Optional Time Zero")
+        row = self.section(display_tab, row, "Relative Time (Optional)")
         ttk.Checkbutton(display_tab, text="Enable Relative Time", variable=self.zero_enabled_var).grid(
             row=row, column=0, columnspan=2, sticky="w"); row += 1
         zero_modes = ttk.Frame(display_tab); zero_modes.grid(row=row, column=0, columnspan=2, sticky="w"); row += 1
-        ttk.Radiobutton(zero_modes, text="Marker as Time 0", variable=self.zero_mode_var, value="marker").pack(side=tk.LEFT)
-        ttk.Radiobutton(zero_modes, text="Specified Time as 0", variable=self.zero_mode_var, value="time").pack(side=tk.LEFT)
+        ttk.Radiobutton(zero_modes, text="Use Marker as Time 0", variable=self.zero_mode_var, value="marker").pack(side=tk.LEFT)
+        ttk.Radiobutton(zero_modes, text="Use Specified Time as 0", variable=self.zero_mode_var, value="time").pack(side=tk.LEFT)
         ttk.Label(display_tab, text="Zero Marker").grid(row=row, column=0, sticky="w")
         self.zero_marker_box = ttk.Combobox(display_tab, textvariable=self.zero_marker_var,
                                             state="readonly", width=20)
         self.zero_marker_box.grid(row=row, column=1, sticky="ew"); row += 1
         row = self.entry(display_tab, row, "Specified Time (original min)", "zero_time")
-        ttk.Button(display_tab, text="Calculate dF/F0 and Z-score", command=self.calculate_normalization,
+        ttk.Button(display_tab, text="Calculate dF/F0 & Z-score", command=self.calculate_normalization,
                    style="Accent.TButton").grid(row=row, column=0, columnspan=2, sticky="ew", pady=(5, 2)); row += 1
-        ttk.Label(display_tab, text="Drag the bottom X-axis to pan horizontally; drag a plot's left Y-axis to pan it vertically. Box zoom works only inside a plot.",
-                   wraplength=350).grid(row=row, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Label(display_tab, text="Drag the bottom X-axis to pan horizontally. Drag a plot's left Y-axis to pan vertically. Box zoom works inside plots.",
+                   wraplength=380, style="Hint.TLabel").grid(row=row, column=0, columnspan=2, sticky="w", pady=(8, 0))
         display_tab.columnconfigure(1, weight=1)
 
         row = 0
-        row = self.section(export_tab, row, "Select Outputs")
+        row = self.section(export_tab, row, "Output Files")
         export_labels = [("corrected_csv", "Corrected Fluorescence CSV"), ("corrected_png", "Corrected Fluorescence PNG"),
                          ("dff_csv", "dF/F0 CSV"), ("dff_png", "dF/F0 PNG"),
                          ("zscore_csv", "Z-score CSV"), ("zscore_png", "Z-score PNG")]
@@ -547,10 +582,10 @@ class PretreatmentApp:
             )
         row += 3
         row = self.entry(export_tab, row, "Output Folder Name", "output_name")
-        ttk.Label(export_tab, text="The output folder is created inside the input folder; a number is appended if the name already exists.",
-                  wraplength=350).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 5)); row += 1
-        ttk.Button(export_tab, text="Save Selected Results", command=self.save_results, style="Accent.TButton").grid(row=row, column=0, columnspan=2, sticky="ew", pady=(8, 4)); row += 1
-        ttk.Label(export_tab, textvariable=self.vars["status"], wraplength=350).grid(row=row, column=0, columnspan=2, sticky="w")
+        ttk.Label(export_tab, text="The output folder is created inside the input folder. A number is appended if the name already exists.",
+                  wraplength=380, style="Hint.TLabel").grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 5)); row += 1
+        ttk.Button(export_tab, text="Export Selected Results", command=self.save_results, style="Accent.TButton").grid(row=row, column=0, columnspan=2, sticky="ew", pady=(8, 4)); row += 1
+        ttk.Label(export_tab, textvariable=self.vars["status"], wraplength=380, style="Status.TLabel").grid(row=row, column=0, columnspan=2, sticky="w", pady=(4, 0))
         export_tab.columnconfigure(0, weight=1); export_tab.columnconfigure(1, weight=1)
 
         self.figure = Figure(figsize=(11, 8), dpi=100, constrained_layout=True)
@@ -602,13 +637,17 @@ class PretreatmentApp:
         self.rebuild_axes(); self.method_changed()
 
     def section(self, parent: Any, row: int, text: str) -> int:
-        self.ttk.Separator(parent).grid(row=row, column=0, columnspan=2, sticky="ew", pady=(5, 3)); row += 1
-        self.ttk.Label(parent, text=text).grid(row=row, column=0, columnspan=2, sticky="w")
+        self.ttk.Separator(parent).grid(row=row, column=0, columnspan=2, sticky="ew", pady=(8, 4)); row += 1
+        self.ttk.Label(parent, text=text, style="Section.TLabel").grid(
+            row=row, column=0, columnspan=2, sticky="w", pady=(0, 3)
+        )
         return row + 1
 
     def entry(self, parent: Any, row: int, label: str, key: str) -> int:
-        self.ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=(0, 5))
-        self.ttk.Entry(parent, textvariable=self.vars[key], width=17).grid(row=row, column=1, sticky="ew")
+        self.ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=2)
+        self.ttk.Entry(parent, textvariable=self.vars[key], width=17).grid(
+            row=row, column=1, sticky="ew", pady=2
+        )
         return row + 1
 
     def number(self, key: str) -> float:
@@ -687,7 +726,7 @@ class PretreatmentApp:
     def pending_smoothing_seconds(self) -> float:
         value = self.number("smooth") if self.smooth_enabled_var.get() else 0.0
         if value < 0:
-            raise ValueError("The Smooth duration cannot be negative.")
+            raise ValueError("The smoothing window cannot be negative.")
         return value
 
     def smoothing_seconds(self) -> float:
@@ -697,10 +736,10 @@ class PretreatmentApp:
         enabled = bool(self.downsample_enabled_var.get())
         mode = self.downsample_mode_var.get()
         if mode not in {"points", "seconds"}:
-            raise ValueError("Invalid Downsample mode.")
+            raise ValueError("Invalid downsampling unit.")
         value = self.number("downsample_value") if enabled else 1.0
         if value <= 0:
-            raise ValueError("The Downsample interval must be greater than 0.")
+            raise ValueError("The downsampling interval must be greater than 0.")
         return enabled, mode, float(value)
 
     def smooth_array(self, values: np.ndarray) -> np.ndarray:
@@ -776,7 +815,7 @@ class PretreatmentApp:
             downsample_text = (f"{downsample_value:g} {downsample_mode}"
                                if downsample_enabled else "Off")
             self.vars["status"].set(
-                f"Display processing applied: Smooth={smooth_seconds:g}s, Downsample={downsample_text}."
+                f"Display processing applied: Smoothing={smooth_seconds:g}s, Downsampling={downsample_text}."
             )
         except Exception as exc:
             messagebox.showerror("Invalid Display Processing Settings", str(exc))
@@ -866,7 +905,7 @@ class PretreatmentApp:
             self.rebuild_axes(); self.draw_processed()
             self.vars["status"].set(
                 f"Correction complete: {len(self.processed):,} points. The current display remains unsmoothed and not downsampled. "
-                "Apply display processing from the Display & Normalization tab if needed."
+                "Apply display processing from the dF/F0 & Z-score tab if needed."
             )
         except Exception as exc:
             messagebox.showerror("Processing Failed", str(exc)); self.vars["status"].set(f"Processing failed: {exc}")
@@ -1690,7 +1729,7 @@ class PretreatmentApp:
             saved_normalization = (normalization["baseline_start_min"], normalization["baseline_end_min"],
                                    normalization["smooth_seconds"], normalization.get("zero_time_min")) if normalization else None
             if saved_normalization != current_normalization:
-                messagebox.showinfo("Normalization Settings Changed", "The baseline, Smooth settings, or time zero has changed. Recalculate dF/F0 and Z-score.")
+                messagebox.showinfo("Normalization Settings Changed", "The baseline, smoothing settings, or time zero has changed. Recalculate dF/F0 and Z-score.")
                 return
         try:
             self.display_cache.clear()
@@ -1803,7 +1842,7 @@ class PretreatmentApp:
                     "exported_rows": int(len(export_frame)),
                     "source_rows_before_downsample": int(len(self.processed)),
                     "line_widths": {key: self.line_width(key) for key in LINE_WIDTH_LABELS},
-                    "note": "Applied Smooth and Downsample affect screen, PNG, CSV, and AAPlot outputs.",
+                    "note": "Applied smoothing and downsampling affect screen, PNG, CSV, and AAPlot outputs.",
                 },
                 "marker_edits": {
                     "deleted_original_markers": [m for m in self.original_markers if m["id"] not in current_ids],

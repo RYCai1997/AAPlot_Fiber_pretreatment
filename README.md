@@ -20,7 +20,7 @@ Open the 470 and, when required, 410 fitting windows separately.
 2. Drag inside the block to move it; drag its left or right edge to resize it.
 3. Click **Add Region** to add more separated fitting regions. Select a block and click **Delete Selected Region** to remove it. Only shaded regions enter parameter estimation.
 4. Click **Preview Fit** to inspect the manually selected model.
-5. Click **Confirm and Save Regions**.
+5. Click **Use These Regions**.
 
 Selected samples are shown as black points over shaded intervals. The raw fitting trace and selected points are drawn at full resolution, and working-copy markers are overlaid. Multi-start search uses a deterministic subset for speed, then the chosen solution is refined using every selected sample. The fitting window reports the parameters, selected sample count, RMSE, BIC, convergence state, iteration count, optimality, and warnings for boundary contact or nearly identical double-exponential time constants. Excluded samples do not enter optimization, final refinement, or model scoring.
 
@@ -43,25 +43,25 @@ Changing effective range, channel offset, channel baseline, or fit model invalid
 - Mouse-wheel zoom is disabled. Drag-box zoom is always enabled—drag a rectangle inside one plot to apply its X range to all plots and its Y range to the active plot. The crosshair remains available whenever a rectangle is not actively being dragged and returns immediately after selection. Use toolbar **Home** or **Restore Initial View** to restore the full view.
 - **Auto-Scale All Y** rescales each visible plot using trace values inside the current X window.
 
-## Smooth and downsample
+## Smoothing and downsampling
 
-The **Display & Normalization** tab provides independent controls for:
+The **dF/F0 & Z-score** tab provides independent controls for:
 
-- optional rolling Smooth, with a window in seconds;
-- optional Downsample by sample-point interval or time interval in seconds.
+- optional rolling smoothing, with a window in seconds;
+- optional downsampling by sample-point interval or time interval in seconds.
 
-The controls default to Smooth 10 seconds and Downsample 1 second, but these are pending settings: loading data and applying a fit still show the unprocessed full-resolution trace. They take effect only after clicking **Apply Smooth / Downsample**. Once applied, the same smoothing and row downsampling are used for the screen, PNG, CSV, and AAPlot-compatible outputs. CSVs retain both original and relative time columns; when smoothing is active, the canonical signal column contains the smoothed result and an `_unsmoothed` companion column preserves the corresponding unsmoothed values at the exported rows.
+The controls default to 10-second smoothing and 1-second downsampling, but these are pending settings: loading data and applying a fit still show the unprocessed full-resolution trace. They take effect only after clicking **Apply Display Processing**. Once applied, the same smoothing and row downsampling are used for the screen, PNG, CSV, and AAPlot-compatible outputs. CSVs retain both original and relative time columns; when smoothing is active, the canonical signal column contains the smoothed result and an `_unsmoothed` companion column preserves the corresponding unsmoothed values at the exported rows.
 
 ## dF/F0 and Z-score
 
 Applying the fit creates corrected fluorescence traces only. It does not silently reuse fitting regions as a normalization baseline.
 
-1. Open **Display & Normalization**.
+1. Open **dF/F0 & Z-score**.
 2. Select the baseline mode:
    - manually enter start/end in original recording minutes; or
    - select a marker and use the specified duration immediately before that marker.
 3. Relative time is enabled by default. Select a marker or a specific original recording time as zero, or disable relative time when it is not wanted.
-4. Click **Calculate dF/F0 and Z-score**.
+4. Click **Calculate dF/F0 & Z-score**.
 
 The program calculates `F0` as the mean corrected analysis trace inside that interval. dF/F0 is `100 × (F - F0) / F0`. Z-score center and SD are calculated from dF/F0 samples inside the same interval. Dedicated dF/F0 and Z-score panels are then added to the right plot area, with the baseline interval shaded. When time zero is enabled, plots use negative/positive relative time, while `original_time_s` and `original_time_min` remain in the underlying data and CSV exports.
 
@@ -77,7 +77,7 @@ The export tab independently selects CSV and PNG output for corrected fluorescen
 - `markers_working_copy.csv`
 - `parameters_and_marker_edits.json`
 
-dF/F0 or Z-score export is blocked until normalization has been calculated. Changing the baseline definition or time-zero definition requires recalculation before export. Applying a new Smooth setting regenerates the displayed/exported smoothed traces; changing Downsample changes the exported row selection without altering the underlying full-resolution calculation.
+dF/F0 or Z-score export is blocked until normalization has been calculated. Changing the baseline definition or time-zero definition requires recalculation before export. Applying a new smoothing setting regenerates the displayed/exported smoothed traces; changing downsampling changes the exported row selection without altering the underlying full-resolution calculation.
 
 Selecting a different input recording resets all analysis, display, line-width, normalization, marker-entry, zoom, axis, and export options to their defaults before the new data are shown.
 
