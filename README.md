@@ -92,3 +92,7 @@ When the corresponding CSV output is selected, the save folder also contains the
 Each contains one comma-separated `.txt` file whose first three columns are `Time` in seconds, `Signal`, and `Marker`. When time zero is enabled, this `Time` column is relative time; full CSV exports still retain original and relative time columns. This is the format read by `D:\Coding\AAPlot\GUI\fiber_trace_spike2_analysis_batch_gui.py`. Signal types are separated into folders so AAPlot does not interpret them as separate animals in one batch.
 
 For ratio/subtraction processing, the corrected analysis trace is the corrected ratio/difference. For 470-only processing, it is corrected 470. Normalization always uses the independently specified normalization baseline interval, not the exponential fitting regions.
+
+## Author and development
+
+Developed by **Ruyi Cai** at **Peking University**, with development assistance from **OpenAI Codex**.
