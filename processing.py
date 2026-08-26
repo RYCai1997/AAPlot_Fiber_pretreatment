@@ -34,7 +34,7 @@ class ProcessingConfig:
 def load_recording(folder: Path) -> tuple[pd.DataFrame, list[dict[str, Any]], str]:
     path = folder / "Fluorescence.csv"
     if not path.exists():
-        raise FileNotFoundError(f"未找到 {path}")
+        raise FileNotFoundError(f"File not found: {path}")
     with path.open("r", encoding="utf-8-sig", errors="replace") as handle:
         metadata = handle.readline().strip()
     data = pd.read_csv(path, skiprows=1)
@@ -42,12 +42,12 @@ def load_recording(folder: Path) -> tuple[pd.DataFrame, list[dict[str, Any]], st
     required = ["TimeStamp", "CH1-410", "CH1-470"]
     missing = [column for column in required if column not in data]
     if missing:
-        raise ValueError(f"Fluorescence.csv 缺少列: {', '.join(missing)}")
+        raise ValueError(f"Fluorescence.csv is missing required columns: {', '.join(missing)}")
     for column in required:
         data[column] = pd.to_numeric(data[column], errors="coerce")
     data = data.dropna(subset=required).sort_values("TimeStamp").reset_index(drop=True)
     if len(data) < 20:
-        raise ValueError("有效数据点少于20个。")
+        raise ValueError("Fewer than 20 valid data points are available.")
 
     markers: list[dict[str, Any]] = []
     events_path = folder / "Events.csv"
@@ -104,12 +104,12 @@ def fit_bleaching(
     fitting, refinement, or scoring.
     """
     if baseline_mode not in {"fixed", "fit_constant"}:
-        raise ValueError(f"未知baseline拟合方式: {baseline_mode}")
+        raise ValueError(f"Unknown baseline fitting mode: {baseline_mode}")
     x = np.asarray(time_s, float) - float(time_s[0])
     y = np.asarray(values, float)
     valid = np.asarray(fit_mask, bool) & np.isfinite(x) & np.isfinite(y)
     if valid.sum() < 20:
-        raise ValueError("拟合区间合计少于20个有效点。")
+        raise ValueError("The fitting regions contain fewer than 20 valid points in total.")
     valid_indices = np.flatnonzero(valid)
     keep = sample_indices(len(valid_indices), 4000)
     xf, yf = x[valid_indices[keep]], y[valid_indices[keep]]
@@ -221,7 +221,7 @@ def fit_bleaching(
                 parameters.update({"baseline_initial": baseline, "fitted_constant": float(result.x[4])})
             parameter_count = len(result.x)
         else:
-            raise ValueError(f"未知拟合模型: {model}")
+            raise ValueError(f"Unknown fitting model: {model}")
     score_indices = valid_indices[sample_indices(len(valid_indices), 2000)]
     residuals = y[score_indices] - fitted[score_indices]
     rss = max(float(np.sum(residuals ** 2)), np.finfo(float).tiny)
@@ -232,16 +232,16 @@ def fit_bleaching(
                   if score_n > parameter_count + 1 else np.inf)
     warnings: list[str] = []
     if not result.success:
-        warnings.append("优化器未报告收敛")
+        warnings.append("The optimizer did not report convergence")
     if lower is not None and upper is not None:
         scale = np.maximum(np.abs(upper - lower), np.finfo(float).eps)
         near_bound = np.minimum(np.abs(result.x - lower), np.abs(upper - result.x)) / scale < 1e-4
         if np.any(near_bound):
-            warnings.append("一个或多个参数接近搜索边界")
+            warnings.append("One or more parameters are close to the search bounds")
     if model == "double_exponential":
         tau_1, tau_2 = float(result.x[2]), float(result.x[3])
         if max(tau_1, tau_2) / max(min(tau_1, tau_2), np.finfo(float).eps) < 1.25:
-            warnings.append("两个时间常数过于接近，双指数参数可能不可辨识")
+            warnings.append("The two time constants are too similar; the double-exponential parameters may not be identifiable")
     parameters.update({
         "model": model,
         "baseline_mode": baseline_mode,
@@ -283,7 +283,7 @@ def select_best_bleaching_model(
         except Exception as exc:
             failures.append({"model": model, "error": str(exc)})
     if not results:
-        raise ValueError(f"所有候选模型均拟合失败: {failures}")
+        raise ValueError(f"All candidate models failed to fit: {failures}")
     results.sort(key=lambda item: item[2]["bic_selected"])
     best_model, best_fitted, best_parameters = results[0]
     comparison = [
@@ -301,7 +301,7 @@ def select_effective_data(data: pd.DataFrame, config: ProcessingConfig) -> pd.Da
     time_min = data["TimeStamp"].to_numpy(float) / 60000
     use = (time_min >= config.range_start_min) & (time_min <= config.range_end_min)
     if use.sum() < 20:
-        raise ValueError("有效数据范围内少于20个点。")
+        raise ValueError("The valid data range contains fewer than 20 points.")
     return data.loc[use].reset_index(drop=True)
 
 
@@ -324,7 +324,7 @@ def process_data(data: pd.DataFrame, config: ProcessingConfig) -> tuple[pd.DataF
     )
     parameters470["fit_regions"] = [list(region) for region in config.fit_regions_470]
     if np.any(np.isclose(fit470, 0)):
-        raise ValueError("470拟合曲线包含0；请调整baseline、offset或拟合区间。")
+        raise ValueError("The fitted 470 curve contains zero. Adjust the baseline, offset, or fitting regions.")
     corrected470 = adjusted470 / fit470 * config.baseline_470
 
     fit410 = np.full(len(subset), np.nan)
@@ -342,11 +342,11 @@ def process_data(data: pd.DataFrame, config: ProcessingConfig) -> tuple[pd.DataF
         )
         parameters410["fit_regions"] = [list(region) for region in config.fit_regions_410]
         if np.any(np.isclose(fit410, 0)):
-            raise ValueError("410拟合曲线包含0；请调整baseline、offset或拟合区间。")
+            raise ValueError("The fitted 410 curve contains zero. Adjust the baseline, offset, or fitting regions.")
         corrected410 = adjusted410 / fit410 * config.baseline_410
         if config.combine == "ratio":
             if np.any(np.isclose(corrected410, 0)):
-                raise ValueError("矫正后410包含0，无法计算ratio。")
+                raise ValueError("The corrected 410 trace contains zero, so the ratio cannot be calculated.")
             combined = corrected470 / corrected410
             combined_label = "Corrected 470 / 410 ratio"
             analysis_reference = config.baseline_470 / config.baseline_410
@@ -355,7 +355,7 @@ def process_data(data: pd.DataFrame, config: ProcessingConfig) -> tuple[pd.DataF
             combined_label = "Corrected 470 - 410"
             analysis_reference = config.baseline_470 - config.baseline_410
         else:
-            raise ValueError(f"未知组合方式: {config.combine}")
+            raise ValueError(f"Unknown combination method: {config.combine}")
 
         analysis_trace = combined.copy()
     else:
@@ -409,23 +409,23 @@ def calculate_normalized_traces(
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Calculate dF/F0 and z-score from a user-selected baseline interval."""
     if baseline_end_min <= baseline_start_min:
-        raise ValueError("归一化baseline结束时间必须大于开始时间。")
+        raise ValueError("The normalization baseline end time must be greater than the start time.")
     result = processed.copy()
     time_min = result["time_min"].to_numpy(float)
     trace = result["analysis_trace"].to_numpy(float)
     baseline_mask = ((time_min >= baseline_start_min) & (time_min <= baseline_end_min)
                      & np.isfinite(trace))
     if baseline_mask.sum() < 20:
-        raise ValueError("归一化baseline区间内少于20个有效数据点。")
+        raise ValueError("The normalization baseline interval contains fewer than 20 valid data points.")
     f0 = float(np.mean(trace[baseline_mask]))
     if not np.isfinite(f0) or np.isclose(f0, 0):
-        raise ValueError("归一化baseline区间的F0为0或无效，无法计算dF/F0。")
+        raise ValueError("F0 in the normalization baseline interval is zero or invalid, so dF/F0 cannot be calculated.")
     dff = 100.0 * (trace - f0) / f0
     baseline_dff = dff[baseline_mask & np.isfinite(dff)]
     z_center = float(np.mean(baseline_dff))
     z_scale = float(np.std(baseline_dff, ddof=1))
     if not np.isfinite(z_scale) or z_scale <= np.finfo(float).eps:
-        raise ValueError("归一化baseline区间内标准差为0，无法计算Z-score。")
+        raise ValueError("The standard deviation in the normalization baseline interval is zero, so the Z-score cannot be calculated.")
     zscore = (dff - z_center) / z_scale
     smooth_points = max(1, int(round(float(smooth_seconds) * float(sample_rate_hz))))
     result["dff_percent"] = dff

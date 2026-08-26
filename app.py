@@ -28,23 +28,23 @@ from processing import (
 DEFAULT_STRINGS = {
     "folder": "", "range_start": "0", "range_end": "0", "offset410": "0", "offset470": "0",
     "baseline410": "", "baseline470": "", "method": "fit_both", "combine": "ratio",
-    "fit_model": "double_exponential", "smooth": "10", "fit410_status": "未设置",
-    "fit470_status": "未设置", "norm_start": "0", "norm_end": "1",
+    "fit_model": "double_exponential", "smooth": "10", "fit410_status": "Not set",
+    "fit470_status": "Not set", "norm_start": "0", "norm_end": "1",
     "norm_pre_duration": "5", "zero_time": "0", "downsample_value": "1",
     "x_start": "", "x_span": "", "x_end": "", "output_name": "",
-    "marker_time": "0", "marker_name": "marker", "status": "请选择记录文件夹。",
+    "marker_time": "0", "marker_name": "marker", "status": "Select a recording folder.",
 }
 
 LINE_WIDTH_LABELS = {
-    "raw470": "470 原始曲线",
-    "fit470": "470 拟合曲线",
-    "corrected470": "470 矫正曲线",
-    "raw410": "410 原始曲线",
-    "fit410": "410 拟合曲线",
-    "corrected410": "410 矫正曲线",
-    "combined": "Ratio / 减法曲线",
-    "dff": "dF/F0 曲线",
-    "zscore": "Z-score 曲线",
+    "raw470": "Raw 470",
+    "fit470": "470 fit",
+    "corrected470": "Corrected 470",
+    "raw410": "Raw 410",
+    "fit410": "410 fit",
+    "corrected410": "Corrected 410",
+    "combined": "Ratio / subtraction",
+    "dff": "dF/F0",
+    "zscore": "Z-score",
 }
 
 
@@ -70,7 +70,7 @@ class FitWindow:
         self.channel, self.config, self.on_accept = channel, config, on_accept
         self.markers = [dict(marker) for marker in markers]
         self.window = tk.Toplevel(parent)
-        self.window.title(f"{channel} 独立拟合区间")
+        self.window.title(f"{channel} fitting regions")
         self.window.geometry("1200x760")
         subset = select_effective_data(data, config)
         self.time_s = subset["TimeStamp"].to_numpy(float) / 1000
@@ -98,30 +98,30 @@ class FitWindow:
         self.drag_start_x = 0.0
         self.drag_original_region = (0.0, 0.0)
         self.region_patches: list[Any] = []
-        self.readout = tk.StringVar(value="拖动区间块移动；拖动左右边缘改变范围。")
+        self.readout = tk.StringVar(value="Drag a region to move it; drag either edge to resize it.")
 
         pane = ttk.Panedwindow(self.window, orient=tk.HORIZONTAL)
         pane.pack(fill=tk.BOTH, expand=True)
         left, right = ttk.Frame(pane, padding=8, width=270), ttk.Frame(pane)
         pane.add(left, weight=0); pane.add(right, weight=1)
         ttk.Label(left, text=f"{channel} nm", font=("Segoe UI", 12, "bold")).pack(anchor="w")
-        ttk.Label(left, text=f"用户baseline: {self.baseline:g}", justify="left").pack(anchor="w", pady=(2, 5))
-        ttk.Label(left, text="手动拟合模型").pack(anchor="w")
+        ttk.Label(left, text=f"User baseline: {self.baseline:g}", justify="left").pack(anchor="w", pady=(2, 5))
+        ttk.Label(left, text="Fitting model").pack(anchor="w")
         self.model_box = ttk.Combobox(
             left, textvariable=self.model_var,
             values=["linear", "single_exponential", "double_exponential"], state="readonly",
         )
         self.model_box.pack(fill=tk.X, pady=(0, 7))
         self.model_box.bind("<<ComboboxSelected>>", self.invalidate_preview)
-        ttk.Label(left, text="Baseline：作为常数项初值并自由拟合（fit_constant）",
+        ttk.Label(left, text="Baseline: initial value for a freely fitted constant (fit_constant)",
                   wraplength=250).pack(anchor="w", pady=(0, 5))
-        ttk.Button(left, text="添加区间块", command=self.add_region).pack(fill=tk.X, pady=2)
-        ttk.Button(left, text="删除选中块", command=self.delete_region).pack(fill=tk.X, pady=2)
+        ttk.Button(left, text="Add region", command=self.add_region).pack(fill=tk.X, pady=2)
+        ttk.Button(left, text="Delete selected region", command=self.delete_region).pack(fill=tk.X, pady=2)
         self.region_list = tk.Listbox(left, height=12, exportselection=False)
         self.region_list.pack(fill=tk.BOTH, expand=True, pady=6)
         self.region_list.bind("<<ListboxSelect>>", self.list_selection_changed)
-        ttk.Button(left, text="预览拟合", command=self.preview_fit).pack(fill=tk.X, pady=2)
-        ttk.Button(left, text="确认并保存拟合区间", command=self.accept).pack(fill=tk.X, pady=2)
+        ttk.Button(left, text="Preview fit", command=self.preview_fit).pack(fill=tk.X, pady=2)
+        ttk.Button(left, text="Confirm and save regions", command=self.accept).pack(fill=tk.X, pady=2)
         ttk.Label(left, textvariable=self.readout, wraplength=250).pack(anchor="w", pady=(8, 0))
 
         self.figure = Figure(figsize=(9, 7), dpi=100, constrained_layout=True)
@@ -131,11 +131,11 @@ class FitWindow:
         toolbar.update(); toolbar.pack(fill=tk.X)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
         fit_footer = ttk.Frame(right, padding=(8, 4)); fit_footer.pack(fill=tk.X)
-        ttk.Label(fit_footer, text="信号线宽").pack(side=tk.LEFT)
+        ttk.Label(fit_footer, text="Signal width").pack(side=tk.LEFT)
         ttk.Scale(fit_footer, from_=0.4, to=3.0, variable=self.signal_width_var,
                   command=lambda _value: self.fit_line_width_changed(), length=150).pack(side=tk.LEFT, padx=6)
         ttk.Label(fit_footer, textvariable=self.signal_width_text, width=4).pack(side=tk.LEFT)
-        ttk.Label(fit_footer, text="拟合线宽").pack(side=tk.LEFT, padx=(16, 0))
+        ttk.Label(fit_footer, text="Fit width").pack(side=tk.LEFT, padx=(16, 0))
         ttk.Scale(fit_footer, from_=0.4, to=3.0, variable=self.fit_width_var,
                   command=lambda _value: self.fit_line_width_changed(), length=150).pack(side=tk.LEFT, padx=6)
         ttk.Label(fit_footer, textvariable=self.fit_width_text, width=4).pack(side=tk.LEFT)
@@ -277,19 +277,19 @@ class FitWindow:
                 self.time_s, self.values, self.baseline, self.selected_model, mask,
                 self.selected_baseline_mode,
             )
-            warning_text = ("\n警告: " + "；".join(parameters["fit_warnings"])) if parameters["fit_warnings"] else ""
+            warning_text = ("\nWarnings: " + "; ".join(parameters["fit_warnings"])) if parameters["fit_warnings"] else ""
             self.readout.set(
-                f"模型: {self.selected_model} | baseline: {self.selected_baseline_mode}\n"
-                f"全部选定点精修: {parameters['final_refinement_samples']:,}\n"
+                f"Model: {self.selected_model} | baseline: {self.selected_baseline_mode}\n"
+                f"Selected samples used in final refinement: {parameters['final_refinement_samples']:,}\n"
                 f"RMSE: {parameters['rmse_selected']:.6g} | BIC: {parameters['bic_selected']:.3f}\n"
                 f"{self.parameter_text(parameters)}\n"
-                f"收敛: {'是' if parameters['optimizer_success'] else '否'} | "
+                f"Converged: {'Yes' if parameters['optimizer_success'] else 'No'} | "
                 f"nfev={parameters['optimizer_nfev']} | optimality={parameters['optimizer_optimality']:.3g}"
                 f"{warning_text}"
             )
             self.draw(fitted)
         except Exception as exc:
-            messagebox.showerror("拟合失败", str(exc), parent=self.window)
+            messagebox.showerror("Fit failed", str(exc), parent=self.window)
 
     def accept(self) -> None:
         from tkinter import messagebox
@@ -303,7 +303,7 @@ class FitWindow:
                            self.selected_baseline_mode)
             self.window.destroy()
         except Exception as exc:
-            messagebox.showerror("拟合区间无效", str(exc), parent=self.window)
+            messagebox.showerror("Invalid fitting regions", str(exc), parent=self.window)
 
     def nearest_value(self, x: float) -> tuple[float, float]:
         index = int(np.clip(np.searchsorted(self.time_min, x), 0, len(self.time_min) - 1))
@@ -369,8 +369,8 @@ class FitWindow:
         patch.set_width(high - low)
         nearest_x, y = self.nearest_value(x)
         self.readout.set(
-            f"区间块 {self.selected_region_index + 1}: {low:.5f}–{high:.5f} min\n"
-            f"当前 X={nearest_x:.5f} min, Y={y:.6g}"
+            f"Region {self.selected_region_index + 1}: {low:.5f}–{high:.5f} min\n"
+            f"Current X={nearest_x:.5f} min, Y={y:.6g}"
         )
         self.canvas.draw_idle()
 
@@ -454,91 +454,91 @@ class PretreatmentApp:
         notebook = ttk.Notebook(controls)
         notebook.pack(fill=tk.BOTH, expand=True)
         data_tab, display_tab, export_tab = ttk.Frame(notebook, padding=10), ttk.Frame(notebook, padding=10), ttk.Frame(notebook, padding=10)
-        notebook.add(data_tab, text="数据与拟合")
-        notebook.add(display_tab, text="显示与归一化")
-        notebook.add(export_tab, text="导出")
+        notebook.add(data_tab, text="Data & Fitting")
+        notebook.add(display_tab, text="Display & Normalization")
+        notebook.add(export_tab, text="Export")
 
         row = 0
-        ttk.Button(data_tab, text="选择记录文件夹", command=self.open_folder, style="Accent.TButton").grid(row=row, column=0, columnspan=2, sticky="ew"); row += 1
+        ttk.Button(data_tab, text="Select Recording Folder", command=self.open_folder, style="Accent.TButton").grid(row=row, column=0, columnspan=2, sticky="ew"); row += 1
         ttk.Label(data_tab, textvariable=self.vars["folder"], wraplength=350).grid(row=row, column=0, columnspan=2, sticky="w", pady=(3, 9)); row += 1
-        row = self.section(data_tab, row, "有效数据范围（min）")
-        row = self.entry(data_tab, row, "开始", "range_start"); row = self.entry(data_tab, row, "结束", "range_end")
-        row = self.section(data_tab, row, "用户指定参数")
+        row = self.section(data_tab, row, "Valid Data Range (min)")
+        row = self.entry(data_tab, row, "Start", "range_start"); row = self.entry(data_tab, row, "End", "range_end")
+        row = self.section(data_tab, row, "User-Defined Parameters")
         for label, key in [("410 offset", "offset410"), ("470 offset", "offset470"),
                            ("410 baseline", "baseline410"), ("470 baseline", "baseline470")]:
             row = self.entry(data_tab, row, label, key)
-        row = self.section(data_tab, row, "矫正方法")
-        ttk.Radiobutton(data_tab, text="分别拟合410与470", variable=self.vars["method"], value="fit_both", command=self.method_changed).grid(row=row, column=0, columnspan=2, sticky="w"); row += 1
-        ttk.Radiobutton(data_tab, text="仅拟合470", variable=self.vars["method"], value="fit_470_only", command=self.method_changed).grid(row=row, column=0, columnspan=2, sticky="w"); row += 1
-        ttk.Label(data_tab, text="组合").grid(row=row, column=0, sticky="w")
+        row = self.section(data_tab, row, "Correction Method")
+        ttk.Radiobutton(data_tab, text="Fit 410 and 470 separately", variable=self.vars["method"], value="fit_both", command=self.method_changed).grid(row=row, column=0, columnspan=2, sticky="w"); row += 1
+        ttk.Radiobutton(data_tab, text="Fit 470 only", variable=self.vars["method"], value="fit_470_only", command=self.method_changed).grid(row=row, column=0, columnspan=2, sticky="w"); row += 1
+        ttk.Label(data_tab, text="Combination").grid(row=row, column=0, sticky="w")
         self.combine_box = ttk.Combobox(data_tab, textvariable=self.vars["combine"], values=["ratio", "subtraction"], state="readonly", width=19)
         self.combine_box.grid(row=row, column=1, sticky="ew"); row += 1
-        ttk.Button(data_tab, text="打开470拟合窗口", command=lambda: self.open_fit("470")).grid(row=row, column=0, sticky="ew", pady=2)
+        ttk.Button(data_tab, text="Open 470 Fitting Window", command=lambda: self.open_fit("470")).grid(row=row, column=0, sticky="ew", pady=2)
         ttk.Label(data_tab, textvariable=self.vars["fit470_status"], wraplength=180).grid(row=row, column=1, sticky="w"); row += 1
-        self.fit410_button = ttk.Button(data_tab, text="打开410拟合窗口", command=lambda: self.open_fit("410"))
+        self.fit410_button = ttk.Button(data_tab, text="Open 410 Fitting Window", command=lambda: self.open_fit("410"))
         self.fit410_button.grid(row=row, column=0, sticky="ew", pady=2)
         ttk.Label(data_tab, textvariable=self.vars["fit410_status"], wraplength=180).grid(row=row, column=1, sticky="w"); row += 1
-        ttk.Button(data_tab, text="应用拟合并更新Trace", command=self.apply_processing, style="Accent.TButton").grid(row=row, column=0, columnspan=2, sticky="ew", pady=(7, 2)); row += 1
-        row = self.section(data_tab, row, "Marker工作副本")
+        ttk.Button(data_tab, text="Apply Fit and Update Traces", command=self.apply_processing, style="Accent.TButton").grid(row=row, column=0, columnspan=2, sticky="ew", pady=(7, 2)); row += 1
+        row = self.section(data_tab, row, "Marker Working Copy")
         self.marker_list = tk.Listbox(data_tab, height=5, exportselection=False, relief="flat", highlightthickness=1)
         self.marker_list.grid(row=row, column=0, columnspan=2, sticky="nsew", pady=(2, 5)); row += 1
-        row = self.entry(data_tab, row, "时间（min）", "marker_time"); row = self.entry(data_tab, row, "名称", "marker_name")
+        row = self.entry(data_tab, row, "Time (min)", "marker_time"); row = self.entry(data_tab, row, "Name", "marker_name")
         marker_buttons = ttk.Frame(data_tab); marker_buttons.grid(row=row, column=0, columnspan=2, sticky="ew")
-        for text, command in [("添加", self.add_marker), ("删除", self.delete_marker), ("恢复原始", self.reset_markers)]:
+        for text, command in [("Add", self.add_marker), ("Delete", self.delete_marker), ("Restore Original", self.reset_markers)]:
             ttk.Button(marker_buttons, text=text, command=command).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=1)
         data_tab.columnconfigure(1, weight=1)
 
         row = 0
-        row = self.section(display_tab, row, "荧光曲线图层")
+        row = self.section(display_tab, row, "Fluorescence Trace Layers")
         layer_row = ttk.Frame(display_tab); layer_row.grid(row=row, column=0, columnspan=2, sticky="w"); row += 1
-        for text, value in [("原始+矫正", "overlay"), ("仅原始", "raw_only"), ("仅矫正", "corrected_only")]:
+        for text, value in [("Raw + Corrected", "overlay"), ("Raw Only", "raw_only"), ("Corrected Only", "corrected_only")]:
             ttk.Radiobutton(layer_row, text=text, variable=self.trace_view_var, value=value,
                             command=self.redraw_current).pack(side=tk.LEFT)
-        ttk.Checkbutton(display_tab, text="显示拟合曲线（红色虚线）", variable=self.show_fit_var,
+        ttk.Checkbutton(display_tab, text="Show fitted curve (red dashed line)", variable=self.show_fit_var,
                         command=self.redraw_current).grid(row=row, column=0, columnspan=2, sticky="w"); row += 1
-        row = self.section(display_tab, row, "Smooth / Downsample（点击应用后生效）")
-        ttk.Checkbutton(display_tab, text="启用Smooth", variable=self.smooth_enabled_var).grid(row=row, column=0, sticky="w")
+        row = self.section(display_tab, row, "Smooth / Downsample (Applied on Demand)")
+        ttk.Checkbutton(display_tab, text="Enable Smooth", variable=self.smooth_enabled_var).grid(row=row, column=0, sticky="w")
         ttk.Entry(display_tab, textvariable=self.vars["smooth"], width=10).grid(row=row, column=1, sticky="ew"); row += 1
-        ttk.Label(display_tab, text="Smooth参数（秒）").grid(row=row, column=0, columnspan=2, sticky="w"); row += 1
-        ttk.Checkbutton(display_tab, text="启用Downsample", variable=self.downsample_enabled_var).grid(row=row, column=0, sticky="w")
+        ttk.Label(display_tab, text="Smooth Window (s)").grid(row=row, column=0, columnspan=2, sticky="w"); row += 1
+        ttk.Checkbutton(display_tab, text="Enable Downsample", variable=self.downsample_enabled_var).grid(row=row, column=0, sticky="w")
         ttk.Combobox(display_tab, textvariable=self.downsample_mode_var, values=["points", "seconds"],
                      state="readonly", width=10).grid(row=row, column=1, sticky="ew"); row += 1
-        row = self.entry(display_tab, row, "Downsample参数", "downsample_value")
-        ttk.Button(display_tab, text="应用 Smooth / Downsample", command=self.display_settings_changed).grid(
+        row = self.entry(display_tab, row, "Downsample Interval", "downsample_value")
+        ttk.Button(display_tab, text="Apply Smooth / Downsample", command=self.display_settings_changed).grid(
             row=row, column=0, columnspan=2, sticky="ew", pady=(2, 4)); row += 1
-        row = self.section(display_tab, row, "dF/F0 与 Z-score baseline")
+        row = self.section(display_tab, row, "dF/F0 and Z-score Baseline")
         baseline_modes = ttk.Frame(display_tab); baseline_modes.grid(row=row, column=0, columnspan=2, sticky="w"); row += 1
-        ttk.Radiobutton(baseline_modes, text="手动指定", variable=self.norm_mode_var,
+        ttk.Radiobutton(baseline_modes, text="Manual", variable=self.norm_mode_var,
                         value="manual").pack(side=tk.LEFT)
-        ttk.Radiobutton(baseline_modes, text="Marker前区间", variable=self.norm_mode_var,
+        ttk.Radiobutton(baseline_modes, text="Pre-Marker Interval", variable=self.norm_mode_var,
                         value="marker_before").pack(side=tk.LEFT)
-        row = self.entry(display_tab, row, "手动开始（原始min）", "norm_start")
-        row = self.entry(display_tab, row, "手动结束（原始min）", "norm_end")
+        row = self.entry(display_tab, row, "Manual Start (original min)", "norm_start")
+        row = self.entry(display_tab, row, "Manual End (original min)", "norm_end")
         ttk.Label(display_tab, text="Baseline Marker").grid(row=row, column=0, sticky="w")
         self.norm_marker_box = ttk.Combobox(display_tab, textvariable=self.norm_marker_var,
                                             state="readonly", width=20)
         self.norm_marker_box.grid(row=row, column=1, sticky="ew"); row += 1
-        row = self.entry(display_tab, row, "Marker前时长（min）", "norm_pre_duration")
-        row = self.section(display_tab, row, "可选时间零点")
-        ttk.Checkbutton(display_tab, text="启用相对时间", variable=self.zero_enabled_var).grid(
+        row = self.entry(display_tab, row, "Pre-Marker Duration (min)", "norm_pre_duration")
+        row = self.section(display_tab, row, "Optional Time Zero")
+        ttk.Checkbutton(display_tab, text="Enable Relative Time", variable=self.zero_enabled_var).grid(
             row=row, column=0, columnspan=2, sticky="w"); row += 1
         zero_modes = ttk.Frame(display_tab); zero_modes.grid(row=row, column=0, columnspan=2, sticky="w"); row += 1
-        ttk.Radiobutton(zero_modes, text="Marker为0", variable=self.zero_mode_var, value="marker").pack(side=tk.LEFT)
-        ttk.Radiobutton(zero_modes, text="指定时刻为0", variable=self.zero_mode_var, value="time").pack(side=tk.LEFT)
+        ttk.Radiobutton(zero_modes, text="Marker as Time 0", variable=self.zero_mode_var, value="marker").pack(side=tk.LEFT)
+        ttk.Radiobutton(zero_modes, text="Specified Time as 0", variable=self.zero_mode_var, value="time").pack(side=tk.LEFT)
         ttk.Label(display_tab, text="Zero Marker").grid(row=row, column=0, sticky="w")
         self.zero_marker_box = ttk.Combobox(display_tab, textvariable=self.zero_marker_var,
                                             state="readonly", width=20)
         self.zero_marker_box.grid(row=row, column=1, sticky="ew"); row += 1
-        row = self.entry(display_tab, row, "指定时刻（原始min）", "zero_time")
-        ttk.Button(display_tab, text="计算 dF/F0 与 Z-score", command=self.calculate_normalization,
+        row = self.entry(display_tab, row, "Specified Time (original min)", "zero_time")
+        ttk.Button(display_tab, text="Calculate dF/F0 and Z-score", command=self.calculate_normalization,
                    style="Accent.TButton").grid(row=row, column=0, columnspan=2, sticky="ew", pady=(5, 2)); row += 1
-        ttk.Label(display_tab, text="拖动底部横轴可左右平移；拖动任一plot左侧纵轴可上下平移。框选放大仅在plot内部生效。",
+        ttk.Label(display_tab, text="Drag the bottom X-axis to pan horizontally; drag a plot's left Y-axis to pan it vertically. Box zoom works only inside a plot.",
                    wraplength=350).grid(row=row, column=0, columnspan=2, sticky="w", pady=(8, 0))
         display_tab.columnconfigure(1, weight=1)
 
         row = 0
-        row = self.section(export_tab, row, "选择输出")
-        export_labels = [("corrected_csv", "矫正荧光 CSV"), ("corrected_png", "矫正荧光 PNG"),
+        row = self.section(export_tab, row, "Select Outputs")
+        export_labels = [("corrected_csv", "Corrected Fluorescence CSV"), ("corrected_png", "Corrected Fluorescence PNG"),
                          ("dff_csv", "dF/F0 CSV"), ("dff_png", "dF/F0 PNG"),
                          ("zscore_csv", "Z-score CSV"), ("zscore_png", "Z-score PNG")]
         for index, (key, label) in enumerate(export_labels):
@@ -546,10 +546,10 @@ class PretreatmentApp:
                 row=row + index // 2, column=index % 2, sticky="w", pady=2
             )
         row += 3
-        row = self.entry(export_tab, row, "结果文件夹名", "output_name")
-        ttk.Label(export_tab, text="结果文件夹会建立在当前输入文件夹内；重名时自动追加编号。",
+        row = self.entry(export_tab, row, "Output Folder Name", "output_name")
+        ttk.Label(export_tab, text="The output folder is created inside the input folder; a number is appended if the name already exists.",
                   wraplength=350).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 5)); row += 1
-        ttk.Button(export_tab, text="保存所选结果", command=self.save_results, style="Accent.TButton").grid(row=row, column=0, columnspan=2, sticky="ew", pady=(8, 4)); row += 1
+        ttk.Button(export_tab, text="Save Selected Results", command=self.save_results, style="Accent.TButton").grid(row=row, column=0, columnspan=2, sticky="ew", pady=(8, 4)); row += 1
         ttk.Label(export_tab, textvariable=self.vars["status"], wraplength=350).grid(row=row, column=0, columnspan=2, sticky="w")
         export_tab.columnconfigure(0, weight=1); export_tab.columnconfigure(1, weight=1)
 
@@ -565,33 +565,33 @@ class PretreatmentApp:
         plot_footer = ttk.Frame(plot_frame, padding=(8, 5)); plot_footer.pack(fill=tk.X)
         width_row = ttk.Frame(plot_footer); width_row.pack(fill=tk.X, pady=(0, 3))
         axis_row = ttk.Frame(plot_footer); axis_row.pack(fill=tk.X)
-        ttk.Label(width_row, text="曲线").pack(side=tk.LEFT)
+        ttk.Label(width_row, text="Trace").pack(side=tk.LEFT)
         self.line_width_box = ttk.Combobox(
             width_row, textvariable=self.line_width_selector_var,
             values=list(LINE_WIDTH_LABELS.values()), state="readonly", width=18,
         )
         self.line_width_box.pack(side=tk.LEFT, padx=(5, 4))
         self.line_width_box.bind("<<ComboboxSelected>>", self.line_width_selection_changed)
-        ttk.Label(width_row, text="线宽").pack(side=tk.LEFT)
+        ttk.Label(width_row, text="Line Width").pack(side=tk.LEFT)
         self.line_width_scale = ttk.Scale(width_row, from_=0.4, to=3.0,
                                           variable=self.line_width_vars["raw470"],
                                           command=self.line_width_changed, length=180)
         self.line_width_scale.pack(side=tk.LEFT, padx=(6, 4))
         ttk.Label(width_row, textvariable=self.line_width_text, width=4).pack(side=tk.LEFT)
-        ttk.Label(axis_row, text="X左端（min）").pack(side=tk.LEFT)
+        ttk.Label(axis_row, text="X Left (min)").pack(side=tk.LEFT)
         x_start_entry = ttk.Entry(axis_row, textvariable=self.vars["x_start"], width=9)
         x_start_entry.pack(side=tk.LEFT, padx=5)
-        ttk.Label(axis_row, text="时间轴范围（min）").pack(side=tk.LEFT)
+        ttk.Label(axis_row, text="X Range (min)").pack(side=tk.LEFT)
         x_span_entry = ttk.Entry(axis_row, textvariable=self.vars["x_span"], width=9)
         x_span_entry.pack(side=tk.LEFT, padx=5)
-        ttk.Label(axis_row, text="X右端（min）").pack(side=tk.LEFT)
+        ttk.Label(axis_row, text="X Right (min)").pack(side=tk.LEFT)
         x_end_entry = ttk.Entry(axis_row, textvariable=self.vars["x_end"], width=9)
         x_end_entry.pack(side=tk.LEFT, padx=5)
         for entry, changed in ((x_start_entry, "start"), (x_span_entry, "span"), (x_end_entry, "end")):
             entry.bind("<Return>", lambda _event, field=changed: self.update_x_from_fields(field, True))
             entry.bind("<FocusOut>", lambda _event, field=changed: self.update_x_from_fields(field, False))
-        ttk.Button(axis_row, text="缩小X范围", command=lambda: self.scale_x_view(0.8)).pack(side=tk.LEFT, padx=(10, 2))
-        ttk.Button(axis_row, text="扩大X范围", command=lambda: self.scale_x_view(1.25)).pack(side=tk.LEFT, padx=2)
+        ttk.Button(axis_row, text="Narrow X Range", command=lambda: self.scale_x_view(0.8)).pack(side=tk.LEFT, padx=(10, 2))
+        ttk.Button(axis_row, text="Widen X Range", command=lambda: self.scale_x_view(1.25)).pack(side=tk.LEFT, padx=2)
         self.canvas.mpl_connect("button_press_event", self.axis_drag_press)
         self.canvas.mpl_connect("motion_notify_event", self.axis_drag_motion)
         self.canvas.mpl_connect("button_release_event", self.axis_drag_release)
@@ -615,9 +615,9 @@ class PretreatmentApp:
         try:
             value = float(self.vars[key].get())
         except ValueError as exc:
-            raise ValueError(f"请明确输入 {key}。") from exc
+            raise ValueError(f"Enter a value for {key}.") from exc
         if not math.isfinite(value):
-            raise ValueError(f"{key}必须是有限数值。")
+            raise ValueError(f"{key} must be a finite number.")
         return value
 
     def reset_parameters_for_new_recording(self) -> None:
@@ -679,15 +679,15 @@ class PretreatmentApp:
             self.fit_baseline_modes["410"], self.fit_baseline_modes["470"],
         )
         if config.range_end_min <= config.range_start_min:
-            raise ValueError("有效范围结束必须大于开始。")
+            raise ValueError("The valid range end must be greater than the start.")
         if config.smooth_seconds < 0:
-            raise ValueError("平滑秒数不能小于0。")
+            raise ValueError("The smoothing duration cannot be negative.")
         return config
 
     def pending_smoothing_seconds(self) -> float:
         value = self.number("smooth") if self.smooth_enabled_var.get() else 0.0
         if value < 0:
-            raise ValueError("Smooth秒数不能小于0。")
+            raise ValueError("The Smooth duration cannot be negative.")
         return value
 
     def smoothing_seconds(self) -> float:
@@ -697,10 +697,10 @@ class PretreatmentApp:
         enabled = bool(self.downsample_enabled_var.get())
         mode = self.downsample_mode_var.get()
         if mode not in {"points", "seconds"}:
-            raise ValueError("Downsample模式无效。")
+            raise ValueError("Invalid Downsample mode.")
         value = self.number("downsample_value") if enabled else 1.0
         if value <= 0:
-            raise ValueError("Downsample参数必须大于0。")
+            raise ValueError("The Downsample interval must be greater than 0.")
         return enabled, mode, float(value)
 
     def smooth_array(self, values: np.ndarray) -> np.ndarray:
@@ -774,12 +774,12 @@ class PretreatmentApp:
                     self.details["normalization"]["smooth_seconds"] = self.smoothing_seconds()
             self.redraw_current()
             downsample_text = (f"{downsample_value:g} {downsample_mode}"
-                               if downsample_enabled else "关闭")
+                               if downsample_enabled else "Off")
             self.vars["status"].set(
-                f"显示处理已应用：Smooth={smooth_seconds:g}s，Downsample={downsample_text}。"
+                f"Display processing applied: Smooth={smooth_seconds:g}s, Downsample={downsample_text}."
             )
         except Exception as exc:
-            messagebox.showerror("显示处理设置无效", str(exc))
+            messagebox.showerror("Invalid Display Processing Settings", str(exc))
 
     def expected_signature(self, channel: str, config: ProcessingConfig) -> tuple[Any, ...]:
         offset = config.offset_470 if channel == "470" else config.offset_410
@@ -790,7 +790,7 @@ class PretreatmentApp:
 
     def open_folder(self) -> None:
         from tkinter import filedialog, messagebox
-        selected = filedialog.askdirectory(title="选择包含Fluorescence.csv的文件夹")
+        selected = filedialog.askdirectory(title="Select the folder containing Fluorescence.csv")
         if not selected:
             return
         try:
@@ -810,10 +810,10 @@ class PretreatmentApp:
             self.vars["output_name"].set(f"output_{self.folder.name}")
             self.refresh_markers(); self.method_changed()
             self.vars["status"].set(
-                "数据已读取，当前显示未Smooth、未Downsample。请手动输入baseline并设置拟合区间。"
+                "Data loaded. The current display is not smoothed or downsampled. Enter the baseline and set the fitting regions."
             )
         except Exception as exc:
-            messagebox.showerror("读取失败", str(exc))
+            messagebox.showerror("Load Failed", str(exc))
 
     def method_changed(self) -> None:
         fit_both = self.vars["method"].get() == "fit_both"
@@ -834,7 +834,7 @@ class PretreatmentApp:
             FitWindow(self.root, channel, self.data, self.markers, config,
                       self.fit_regions[channel], self.accept_fit_regions)
         except Exception as exc:
-            messagebox.showerror("不能打开拟合窗口", str(exc))
+            messagebox.showerror("Cannot Open Fitting Window", str(exc))
 
     def accept_fit_regions(
         self, channel: str, regions: list[tuple[float, float]], signature: tuple[Any, ...], model: str,
@@ -844,8 +844,8 @@ class PretreatmentApp:
         self.fit_signatures[channel] = signature
         self.fit_models[channel] = model
         self.fit_baseline_modes[channel] = baseline_mode
-        self.vars[f"fit{channel}_status"].set(f"{len(regions)}段 | {model} | {baseline_mode}")
-        self.vars["status"].set(f"{channel}拟合区间与模型已保存。")
+        self.vars[f"fit{channel}_status"].set(f"{len(regions)} region(s) | {model} | {baseline_mode}")
+        self.vars["status"].set(f"{channel} fitting regions and model saved.")
 
     def apply_processing(self) -> None:
         from tkinter import messagebox
@@ -856,20 +856,20 @@ class PretreatmentApp:
             required = ["470"] + (["410"] if config.method == "fit_both" else [])
             for channel in required:
                 if not self.fit_regions[channel]:
-                    raise ValueError(f"请先在{channel}拟合窗口中选择并确认拟合区间。")
+                    raise ValueError(f"Select and confirm fitting regions in the {channel} fitting window first.")
                 if self.fit_signatures[channel] != self.expected_signature(channel, config):
-                    raise ValueError(f"{channel}的范围、offset、baseline或拟合模型已改变；请重新确认该通道拟合。")
-            self.vars["status"].set("正在拟合……"); self.root.update_idletasks()
+                    raise ValueError(f"The {channel} range, offset, baseline, or fitting model has changed. Reconfirm this channel's fit.")
+            self.vars["status"].set("Fitting..."); self.root.update_idletasks()
             self.processed, self.details = process_data(self.data, config)
             self.normalized = False
             self.display_cache.clear()
             self.rebuild_axes(); self.draw_processed()
             self.vars["status"].set(
-                f"矫正完成：{len(self.processed):,}点；当前仍为未Smooth、未Downsample显示。"
-                "如需要，请在显示与归一化页点击应用。"
+                f"Correction complete: {len(self.processed):,} points. The current display remains unsmoothed and not downsampled. "
+                "Apply display processing from the Display & Normalization tab if needed."
             )
         except Exception as exc:
-            messagebox.showerror("处理失败", str(exc)); self.vars["status"].set(f"处理失败：{exc}")
+            messagebox.showerror("Processing Failed", str(exc)); self.vars["status"].set(f"Processing failed: {exc}")
 
     def rebuild_axes(self) -> None:
         method = self.vars["method"].get()
@@ -898,8 +898,8 @@ class PretreatmentApp:
             self.scale_panel.rowconfigure(row, weight=0)
         global_frame = self.ttk.Frame(self.scale_panel)
         global_frame.grid(row=0, column=0, sticky="ew", pady=(0, 5))
-        self.ttk.Button(global_frame, text="恢复初始视图", command=self.restore_initial_view).pack(fill=self.tk.X, pady=1)
-        self.ttk.Button(global_frame, text="全部Y自适应", command=self.autoscale_current_window).pack(fill=self.tk.X, pady=1)
+        self.ttk.Button(global_frame, text="Restore Initial View", command=self.restore_initial_view).pack(fill=self.tk.X, pady=1)
+        self.ttk.Button(global_frame, text="Auto-Scale All Y", command=self.autoscale_current_window).pack(fill=self.tk.X, pady=1)
         for row, key in enumerate(self.axis_keys, start=1):
             self.scale_panel.rowconfigure(row, weight=1)
             frame = self.ttk.Frame(self.scale_panel)
@@ -917,13 +917,13 @@ class PretreatmentApp:
             if upper_variable is None:
                 upper_variable = self.tk.StringVar(value="")
                 self.axis_upper_vars[key] = upper_variable
-            self.ttk.Label(frame, text="Y下端").pack()
+            self.ttk.Label(frame, text="Y Lower").pack()
             lower_entry = self.ttk.Entry(frame, textvariable=lower_variable, width=10, justify="center")
             lower_entry.pack(pady=(0, 2))
-            self.ttk.Label(frame, text="Y范围").pack()
+            self.ttk.Label(frame, text="Y Range").pack()
             span_entry = self.ttk.Entry(frame, textvariable=span_variable, width=10, justify="center")
             span_entry.pack(pady=(0, 2))
-            self.ttk.Label(frame, text="Y上端").pack()
+            self.ttk.Label(frame, text="Y Upper").pack()
             upper_entry = self.ttk.Entry(frame, textvariable=upper_variable, width=10, justify="center")
             upper_entry.pack(pady=(0, 2))
             for entry, changed in ((lower_entry, "lower"), (span_entry, "span"), (upper_entry, "upper")):
@@ -944,7 +944,7 @@ class PretreatmentApp:
             return None
         value = float(text)
         if not math.isfinite(value):
-            raise ValueError("坐标值必须是有限数值。")
+            raise ValueError("Axis values must be finite numbers.")
         return value
 
     def update_y_from_fields(self, key: str, changed: str, show_error: bool = True) -> None:
@@ -973,7 +973,7 @@ class PretreatmentApp:
             if None in (lower, span, upper):
                 return
             if span <= 0 or upper <= lower:
-                raise ValueError("Y轴范围必须大于0，且上端必须大于下端。")
+                raise ValueError("The Y range must be greater than 0, and the upper limit must exceed the lower limit.")
             self.axis_lower_vars[key].set(f"{lower:.7g}")
             self.axis_scale_vars[key].set(f"{span:.7g}")
             self.axis_upper_vars[key].set(f"{upper:.7g}")
@@ -983,7 +983,7 @@ class PretreatmentApp:
             self.canvas.draw_idle()
         except Exception as exc:
             if show_error:
-                messagebox.showerror("Y轴范围无效", str(exc))
+                messagebox.showerror("Invalid Y-Axis Range", str(exc))
 
     def update_x_from_fields(self, changed: str, show_error: bool = True) -> None:
         from tkinter import messagebox
@@ -1009,7 +1009,7 @@ class PretreatmentApp:
             if None in (start, span, end):
                 return
             if span <= 0 or end <= start:
-                raise ValueError("时间轴范围必须大于0，且右端必须大于左端。")
+                raise ValueError("The time range must be greater than 0, and the right limit must exceed the left limit.")
             self.vars["x_start"].set(f"{start:.7g}")
             self.vars["x_span"].set(f"{span:.7g}")
             self.vars["x_end"].set(f"{end:.7g}")
@@ -1019,7 +1019,7 @@ class PretreatmentApp:
             self.canvas.draw_idle()
         except Exception as exc:
             if show_error:
-                messagebox.showerror("时间轴范围无效", str(exc))
+                messagebox.showerror("Invalid Time-Axis Range", str(exc))
 
     def scale_y_axis(self, key: str, factor: float) -> None:
         """Scale one Y range around its current center without changing the data."""
@@ -1076,7 +1076,7 @@ class PretreatmentApp:
             if key in self.initial_y_limits:
                 ax.set_ylim(*self.initial_y_limits[key])
         self.update_scale_readouts()
-        self.vars["status"].set("Trace视图已恢复到当前数据的初始完整范围。")
+        self.vars["status"].set("Trace view restored to the full initial range of the current data.")
         self.canvas.draw_idle()
 
     def axis_drag_press(self, event: Any) -> None:
@@ -1151,7 +1151,7 @@ class PretreatmentApp:
         self.axis_drag_state = None
         self.set_canvas_cursor("")
         self.vars["status"].set(
-            "已通过横轴平移时间窗口。" if kind == "x" else f"已上下平移 {key} plot。"
+            "Time window panned using the X-axis." if kind == "x" else f"The {key} plot was panned vertically."
         )
 
     def set_canvas_cursor(self, cursor: str) -> None:
@@ -1351,7 +1351,7 @@ class PretreatmentApp:
                     padding = (high - low) * 0.06
                 ax.set_ylim(low - padding, high + padding)
                 adjusted += 1
-        self.vars["status"].set(f"已按当前X窗口调整{adjusted}个plot的Y轴。")
+        self.vars["status"].set(f"Y-axis auto-scaled for {adjusted} plot(s) in the current X window.")
         self.update_scale_readouts()
         self.canvas.draw_idle()
 
@@ -1460,13 +1460,13 @@ class PretreatmentApp:
     def marker_time_from_choice(self, choice: str) -> float:
         choices = self.marker_choices()
         if choice not in choices:
-            raise ValueError("请选择一个有效Marker。")
+            raise ValueError("Select a valid marker.")
         return float(self.sorted_markers()[choices.index(choice)]["time_min"])
 
     def refresh_markers(self) -> None:
         self.marker_list.delete(0, self.tk.END)
         for marker in self.sorted_markers():
-            source = "原始" if marker["source"] == "original" else "手动"
+            source = "Original" if marker["source"] == "original" else "Manual"
             self.marker_list.insert(self.tk.END, f"[{source}] {marker['time_min']:.4f}  {marker['name']}")
         choices = self.marker_choices()
         for box, variable in ((getattr(self, "norm_marker_box", None), self.norm_marker_var),
@@ -1486,7 +1486,7 @@ class PretreatmentApp:
                                  "name": self.vars["marker_name"].get().strip() or "marker", "source": "manual"})
             self.refresh_markers(); self.redraw_current()
         except Exception as exc:
-            self.vars["status"].set(f"Marker添加失败：{exc}")
+            self.vars["status"].set(f"Failed to add marker: {exc}")
 
     def delete_marker(self) -> None:
         selected = self.marker_list.curselection()
@@ -1529,7 +1529,7 @@ class PretreatmentApp:
         marker_time = self.marker_time_from_choice(self.norm_marker_var.get())
         duration = self.number("norm_pre_duration")
         if duration <= 0:
-            raise ValueError("Marker前baseline时长必须大于0。")
+            raise ValueError("The pre-marker baseline duration must be greater than 0.")
         return marker_time - duration, marker_time, {
             "mode": "marker_before", "marker": self.norm_marker_var.get(),
             "duration_min": duration,
@@ -1547,7 +1547,7 @@ class PretreatmentApp:
     def calculate_normalization(self) -> None:
         from tkinter import messagebox
         if self.processed is None or self.details is None:
-            messagebox.showinfo("尚未矫正", "请先完成拟合并应用矫正。")
+            messagebox.showinfo("Correction Required", "Complete fitting and apply correction first.")
             return
         try:
             baseline_start, baseline_end, baseline_definition = self.resolve_baseline_interval()
@@ -1568,11 +1568,11 @@ class PretreatmentApp:
             self.display_cache.clear()
             self.rebuild_axes(); self.draw_processed()
             self.vars["status"].set(
-                f"归一化完成：F0={normalization_details['f0_mean']:.7g}，"
-                f"baseline点数={normalization_details['samples']:,}。"
+                f"Normalization complete: F0={normalization_details['f0_mean']:.7g}, "
+                f"baseline samples={normalization_details['samples']:,}."
             )
         except Exception as exc:
-            messagebox.showerror("归一化失败", str(exc))
+            messagebox.showerror("Normalization Failed", str(exc))
 
     def redraw_current(self) -> None:
         limits = None
@@ -1628,18 +1628,18 @@ class PretreatmentApp:
 
     def next_output_directory(self) -> Path:
         if self.folder is None:
-            raise ValueError("尚未选择输入文件夹。")
+            raise ValueError("No input folder has been selected.")
         output_name = self.vars["output_name"].get().strip()
         if not output_name:
-            raise ValueError("请输入结果文件夹名。")
+            raise ValueError("Enter an output folder name.")
         if re.search(r'[<>:"/\\|?*\x00-\x1f]', output_name) or output_name in {".", ".."}:
-            raise ValueError("结果文件夹名包含Windows不允许的字符。")
+            raise ValueError("The output folder name contains characters that are not allowed by Windows.")
         if output_name.endswith((" ", ".")):
-            raise ValueError("结果文件夹名不能以空格或句点结尾。")
+            raise ValueError("The output folder name cannot end with a space or period.")
         reserved = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)),
                     *(f"LPT{i}" for i in range(1, 10))}
         if output_name.upper() in reserved:
-            raise ValueError("该结果文件夹名是Windows保留名称，请更换。")
+            raise ValueError("This output folder name is reserved by Windows. Choose another name.")
         output = self.folder / output_name
         suffix = 2
         while output.exists():
@@ -1650,7 +1650,7 @@ class PretreatmentApp:
     def prepared_export_frame(self) -> tuple[pd.DataFrame, np.ndarray]:
         """Return rows and signal values after the display processing that was actually applied."""
         if self.processed is None:
-            raise ValueError("尚无可输出的数据。")
+            raise ValueError("No data are available for export.")
         indices = self.display_indices(len(self.processed))
         frame = self.processed.iloc[indices].copy().reset_index(drop=True)
         signal_columns = [
@@ -1669,15 +1669,15 @@ class PretreatmentApp:
     def save_results(self) -> None:
         from tkinter import messagebox
         if self.processed is None or self.details is None or self.folder is None:
-            messagebox.showinfo("尚无结果", "请先完成拟合并应用。")
+            messagebox.showinfo("No Results", "Complete fitting and apply the correction first.")
             return
         selections = {key: var.get() for key, var in self.export_vars.items()}
         if not any(selections.values()):
-            messagebox.showinfo("未选择输出", "请至少选择一种CSV或PNG输出。")
+            messagebox.showinfo("No Output Selected", "Select at least one CSV or PNG output.")
             return
         normalization_requested = any(selections[key] for key in ("dff_csv", "dff_png", "zscore_csv", "zscore_png"))
         if normalization_requested and not self.normalized:
-            messagebox.showinfo("尚未归一化", "请先设置baseline区间并计算dF/F0与Z-score。")
+            messagebox.showinfo("Normalization Required", "Set the baseline interval and calculate dF/F0 and Z-score first.")
             return
         if normalization_requested and self.details is not None:
             normalization = self.details.get("normalization")
@@ -1686,11 +1686,11 @@ class PretreatmentApp:
                 zero_time, _ = self.resolve_zero_time()
                 current_normalization = (baseline_start, baseline_end, self.smoothing_seconds(), zero_time)
             except Exception as exc:
-                messagebox.showerror("归一化设置无效", str(exc)); return
+                messagebox.showerror("Invalid Normalization Settings", str(exc)); return
             saved_normalization = (normalization["baseline_start_min"], normalization["baseline_end_min"],
                                    normalization["smooth_seconds"], normalization.get("zero_time_min")) if normalization else None
             if saved_normalization != current_normalization:
-                messagebox.showinfo("归一化设置已改变", "baseline、Smooth或时间零点已改变，请重新计算dF/F0与Z-score。")
+                messagebox.showinfo("Normalization Settings Changed", "The baseline, Smooth settings, or time zero has changed. Recalculate dF/F0 and Z-score.")
                 return
         try:
             self.display_cache.clear()
@@ -1818,10 +1818,10 @@ class PretreatmentApp:
                 "source_metadata": self.metadata,
             }
             (output / "parameters_and_marker_edits.json").write_text(json.dumps(log, indent=2, ensure_ascii=False), encoding="utf-8")
-            self.vars["status"].set(f"已保存：{output}")
-            messagebox.showinfo("保存完成", f"{output}\n\n原始数据未修改。")
+            self.vars["status"].set(f"Saved: {output}")
+            messagebox.showinfo("Save Complete", f"{output}\n\nThe original data were not modified.")
         except Exception as exc:
-            messagebox.showerror("保存失败", str(exc))
+            messagebox.showerror("Save Failed", str(exc))
 
 
 def main() -> int:
@@ -1829,7 +1829,7 @@ def main() -> int:
         import tkinter as tk
         root = tk.Tk(); PretreatmentApp(root); root.mainloop(); return 0
     except Exception as exc:
-        print(f"GUI启动失败：{exc}", file=sys.stderr); return 1
+        print(f"GUI failed to start: {exc}", file=sys.stderr); return 1
 
 
 if __name__ == "__main__":

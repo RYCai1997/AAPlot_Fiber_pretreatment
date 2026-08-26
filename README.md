@@ -18,9 +18,9 @@ Open the 470 and, when required, 410 fitting windows separately.
 
 1. One shaded interval block is created by default.
 2. Drag inside the block to move it; drag its left or right edge to resize it.
-3. Click **添加区间块** to add more separated fitting regions. Select a block and click **删除选中块** to remove it. Only shaded regions enter parameter estimation.
-4. Click **预览拟合** to inspect the manually selected model.
-5. Click **确认并保存拟合区间**.
+3. Click **Add Region** to add more separated fitting regions. Select a block and click **Delete Selected Region** to remove it. Only shaded regions enter parameter estimation.
+4. Click **Preview Fit** to inspect the manually selected model.
+5. Click **Confirm and Save Regions**.
 
 Selected samples are shown as black points over shaded intervals. The raw fitting trace and selected points are drawn at full resolution, and working-copy markers are overlaid. Multi-start search uses a deterministic subset for speed, then the chosen solution is refined using every selected sample. The fitting window reports the parameters, selected sample count, RMSE, BIC, convergence state, iteration count, optimality, and warnings for boundary contact or nearly identical double-exponential time constants. Excluded samples do not enter optimization, final refinement, or model scoring.
 
@@ -36,38 +36,38 @@ Changing effective range, channel offset, channel baseline, or fit model invalid
 - Every raw, fitted, corrected, combined, dF/F0, and Z-score curve has an independent thickness setting below the plot area. The fitting window separately controls signal and fit line widths.
 - Horizontal grids are always off.
 - Each plot has Y-lower-endpoint, Y-range, and Y-upper-endpoint inputs on the right. The bottom has X-left-endpoint, time-range, and X-right-endpoint inputs. Entering or leaving any field calculates the third value from the edited field and one other available value, then immediately updates the axes; there is no separate Apply button.
-- The right-side view controls include **恢复初始视图**, **全部Y自适应**, and per-plot `Y−` / `Y+` buttons for reducing or enlarging that panel's Y range around its center.
-- The bottom controls include **缩小X范围** and **扩大X范围**. X scaling stays centered on the current window and is clamped to the full trace range.
+- The right-side view controls include **Restore Initial View**, **Auto-Scale All Y**, and per-plot `Y−` / `Y+` buttons for reducing or enlarging that panel's Y range around its center.
+- The bottom controls include **Narrow X Range** and **Widen X Range**. X scaling stays centered on the current window and is clamped to the full trace range.
 - Drag the bottom X axis horizontally to pan every plot together. Drag the left Y axis of any individual plot vertically to move only that plot's Y window. Axis dragging works outside the plot area, while drag-box zoom works inside it.
 - Moving the mouse over any plot displays a blitted crosshair; the Y label is drawn inside the left edge so it is not clipped.
-- Mouse-wheel zoom is disabled. Drag-box zoom is always enabled—drag a rectangle inside one plot to apply its X range to all plots and its Y range to the active plot. The crosshair remains available whenever a rectangle is not actively being dragged and returns immediately after selection. Use toolbar **Home** or **恢复初始视图** to restore the full view.
-- **全部Y自适应** rescales each visible plot using trace values inside the current X window.
+- Mouse-wheel zoom is disabled. Drag-box zoom is always enabled—drag a rectangle inside one plot to apply its X range to all plots and its Y range to the active plot. The crosshair remains available whenever a rectangle is not actively being dragged and returns immediately after selection. Use toolbar **Home** or **Restore Initial View** to restore the full view.
+- **Auto-Scale All Y** rescales each visible plot using trace values inside the current X window.
 
 ## Smooth and downsample
 
-The **显示与归一化** tab provides independent controls for:
+The **Display & Normalization** tab provides independent controls for:
 
 - optional rolling Smooth, with a window in seconds;
 - optional Downsample by sample-point interval or time interval in seconds.
 
-The controls default to Smooth 10 seconds and Downsample 1 second, but these are pending settings: loading data and applying a fit still show the unprocessed full-resolution trace. They take effect only after clicking **应用 Smooth / Downsample**. Once applied, the same smoothing and row downsampling are used for the screen, PNG, CSV, and AAPlot-compatible outputs. CSVs retain both original and relative time columns; when smoothing is active, the canonical signal column contains the smoothed result and an `_unsmoothed` companion column preserves the corresponding unsmoothed values at the exported rows.
+The controls default to Smooth 10 seconds and Downsample 1 second, but these are pending settings: loading data and applying a fit still show the unprocessed full-resolution trace. They take effect only after clicking **Apply Smooth / Downsample**. Once applied, the same smoothing and row downsampling are used for the screen, PNG, CSV, and AAPlot-compatible outputs. CSVs retain both original and relative time columns; when smoothing is active, the canonical signal column contains the smoothed result and an `_unsmoothed` companion column preserves the corresponding unsmoothed values at the exported rows.
 
 ## dF/F0 and Z-score
 
 Applying the fit creates corrected fluorescence traces only. It does not silently reuse fitting regions as a normalization baseline.
 
-1. Open **显示与归一化**.
+1. Open **Display & Normalization**.
 2. Select the baseline mode:
    - manually enter start/end in original recording minutes; or
    - select a marker and use the specified duration immediately before that marker.
 3. Relative time is enabled by default. Select a marker or a specific original recording time as zero, or disable relative time when it is not wanted.
-4. Click **计算 dF/F0 与 Z-score**.
+4. Click **Calculate dF/F0 and Z-score**.
 
 The program calculates `F0` as the mean corrected analysis trace inside that interval. dF/F0 is `100 × (F - F0) / F0`. Z-score center and SD are calculated from dF/F0 samples inside the same interval. Dedicated dF/F0 and Z-score panels are then added to the right plot area, with the baseline interval shaded. When time zero is enabled, plots use negative/positive relative time, while `original_time_s` and `original_time_min` remain in the underlying data and CSV exports.
 
 ## Marker and outputs
 
-Marker controls are located on **数据与拟合**. Original markers are loaded into a working copy. Adding, deleting, and restoring markers never modifies `Events.csv`.
+Marker controls are located on **Data & Fitting**. Original markers are loaded into a working copy. Adding, deleting, and restoring markers never modifies `Events.csv`.
 
 The export tab independently selects CSV and PNG output for corrected fluorescence, dF/F0, and Z-score. Corrected-fluorescence CSV is unchecked by default. The editable result-folder name defaults to `output_<input folder name>`; each save creates that folder directly inside the input recording folder, and appends `_2`, `_3`, etc. instead of overwriting an existing result. Depending on the selected boxes it can contain:
 
