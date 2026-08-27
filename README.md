@@ -2,10 +2,6 @@
 
 This folder is a standalone interactive pretreatment program. Double-click `run_RWD_fiber_pretreatment.bat` to start it.
 
-## Two acquisition channels
-
-`Fluorescence.csv` must contain `TimeStamp`, `CH1-410`, and `CH1-470`. It may additionally contain complete `CH2`, `CH3`, … pairs, each with `-410` and `-470` columns. Select the desired channel under **Recording Channel** and process it independently. Each channel retains its own **Valid Data Range**; the first time a channel is selected it starts with the complete recording, rather than inheriting another channel's range. Changing the selector clears the current fit so 410 and 470 cannot be combined across acquisition channels.
-
 ## Processing rules
 
 - 410 is never used as a regression basis for fitting 470.
@@ -74,8 +70,6 @@ The program calculates `F0` as the mean corrected analysis trace inside that int
 Marker controls are located on **Data & Fitting**. Original markers are loaded into a working copy. Adding, deleting, and restoring markers never modifies `Events.csv`.
 
 The export tab independently selects CSV and PNG output for corrected fluorescence, dF/F0, and Z-score. Corrected-fluorescence CSV is unchecked by default. The editable result-folder name defaults to `output_<input folder name>`; each save creates that folder directly inside the input recording folder, and appends `_2`, `_3`, etc. instead of overwriting an existing result. Depending on the selected boxes it can contain:
-
-In ratio mode, corrected 470, corrected 410, and the corrected ratio all use the same applied smoothing and downsampling. dF/F0 and Z-score are calculated and exported for all three traces; the legacy `dff_percent` and `zscore` columns refer to the ratio. Under **Trace Annotation**, choose no highlight, the normalization baseline, or a duration beginning at a selected marker. PNG exports shade this interval and CSV exports include an `export_window` column (1 inside, 0 outside).
 
 - `corrected_fluorescence_trace.csv` / `.png`
 - `dFF0_trace.csv` / `.png`

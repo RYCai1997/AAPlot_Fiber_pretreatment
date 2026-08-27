@@ -31,7 +31,6 @@ DEFAULT_STRINGS = {
     "fit_model": "double_exponential", "smooth": "10", "fit410_status": "Not set",
     "fit470_status": "Not set", "norm_start": "0", "norm_end": "1",
     "norm_pre_duration": "5", "zero_time": "0", "downsample_value": "1",
-    "export_window_duration": "5",
     "x_start": "", "x_span": "", "x_end": "", "output_name": "",
     "marker_time": "0", "marker_name": "marker", "status": "Select a recording folder.",
 }
@@ -76,7 +75,7 @@ class FitWindow:
         subset = select_effective_data(data, config)
         self.time_s = subset["TimeStamp"].to_numpy(float) / 1000
         self.time_min = self.time_s / 60
-        raw = subset[f"{config.source_channel}-{channel}"].to_numpy(float)
+        raw = subset[f"CH1-{channel}"].to_numpy(float)
         offset = config.offset_470 if channel == "470" else config.offset_410
         self.baseline = config.baseline_470 if channel == "470" else config.baseline_410
         self.values = raw - offset
@@ -399,8 +398,6 @@ class PretreatmentApp:
         self.fit_signatures: dict[str, tuple[Any, ...] | None] = {"410": None, "470": None}
         self.fit_models: dict[str, str | None] = {"410": None, "470": None}
         self.fit_baseline_modes: dict[str, str | None] = {"410": "fit_constant", "470": "fit_constant"}
-        self.active_source_channel = "CH1"
-        self.channel_ranges: dict[str, tuple[float, float]] = {}
         self.axes: list[Any] = []
         self.axis_keys: list[str] = []
         self.normalized = False
@@ -437,13 +434,10 @@ class PretreatmentApp:
         self.zero_enabled_var = tk.BooleanVar(value=True)
         self.zero_mode_var = tk.StringVar(value="marker")
         self.zero_marker_var = tk.StringVar(value="")
-        self.source_channel_var = tk.StringVar(value="CH1")
-        self.export_annotation_var = tk.StringVar(value="none")
-        self.export_marker_var = tk.StringVar(value="")
         self.export_vars = {
             "corrected_csv": tk.BooleanVar(value=False), "corrected_png": tk.BooleanVar(value=True),
-            "dff_csv": tk.BooleanVar(value=True), "dff_png": tk.BooleanVar(value=True), "dff_svg": tk.BooleanVar(value=False),
-            "zscore_csv": tk.BooleanVar(value=True), "zscore_png": tk.BooleanVar(value=True), "zscore_svg": tk.BooleanVar(value=False),
+            "dff_csv": tk.BooleanVar(value=True), "dff_png": tk.BooleanVar(value=True),
+            "zscore_csv": tk.BooleanVar(value=True), "zscore_png": tk.BooleanVar(value=True),
         }
 
         palette = {
@@ -500,11 +494,6 @@ class PretreatmentApp:
         row = 0
         ttk.Button(data_tab, text="Select Recording Folder", command=self.open_folder, style="Accent.TButton").grid(row=row, column=0, columnspan=2, sticky="ew"); row += 1
         ttk.Label(data_tab, textvariable=self.vars["folder"], wraplength=350).grid(row=row, column=0, columnspan=2, sticky="w", pady=(3, 9)); row += 1
-        ttk.Label(data_tab, text="Recording Channel").grid(row=row, column=0, sticky="w")
-        self.source_channel_box = ttk.Combobox(data_tab, textvariable=self.source_channel_var,
-                                               values=["CH1"], state="readonly", width=19)
-        self.source_channel_box.grid(row=row, column=1, sticky="ew"); row += 1
-        self.source_channel_box.bind("<<ComboboxSelected>>", lambda _event: self.channel_changed())
         row = self.section(data_tab, row, "Valid Data Range (min)")
         row = self.entry(data_tab, row, "Start", "range_start"); row = self.entry(data_tab, row, "End", "range_end")
         row = self.section(data_tab, row, "Offsets & Fitting Baselines")
@@ -586,22 +575,12 @@ class PretreatmentApp:
         row = self.section(export_tab, row, "Output Files")
         export_labels = [("corrected_csv", "Corrected Fluorescence CSV"), ("corrected_png", "Corrected Fluorescence PNG"),
                          ("dff_csv", "dF/F0 CSV"), ("dff_png", "dF/F0 PNG"),
-                         ("dff_svg", "dF/F0 SVG (Vector)"), ("zscore_csv", "Z-score CSV"),
-                         ("zscore_png", "Z-score PNG"), ("zscore_svg", "Z-score SVG (Vector)")]
+                         ("zscore_csv", "Z-score CSV"), ("zscore_png", "Z-score PNG")]
         for index, (key, label) in enumerate(export_labels):
             ttk.Checkbutton(export_tab, text=label, variable=self.export_vars[key]).grid(
                 row=row + index // 2, column=index % 2, sticky="w", pady=2
             )
-        row += 4
-        row = self.section(export_tab, row, "Trace Annotation")
-        annotation_modes = ttk.Frame(export_tab); annotation_modes.grid(row=row, column=0, columnspan=2, sticky="w"); row += 1
-        for text, value in [("None", "none"), ("Normalization Baseline", "baseline"), ("After Marker Window", "marker_after")]:
-            ttk.Radiobutton(annotation_modes, text=text, variable=self.export_annotation_var, value=value).pack(side=tk.LEFT)
-        ttk.Label(export_tab, text="Annotation Marker").grid(row=row, column=0, sticky="w")
-        self.export_marker_box = ttk.Combobox(export_tab, textvariable=self.export_marker_var, state="readonly", width=20)
-        self.export_marker_box.grid(row=row, column=1, sticky="ew"); row += 1
-        row = self.entry(export_tab, row, "Marker Window (min)", "export_window_duration")
-        ttk.Label(export_tab, text="The selected region is shaded in PNG files and recorded as export_window in CSV files.", wraplength=380, style="Hint.TLabel").grid(row=row, column=0, columnspan=2, sticky="w"); row += 1
+        row += 3
         row = self.entry(export_tab, row, "Output Folder Name", "output_name")
         ttk.Label(export_tab, text="The output folder is created inside the input folder. A number is appended if the name already exists.",
                   wraplength=380, style="Hint.TLabel").grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 5)); row += 1
@@ -699,13 +678,9 @@ class PretreatmentApp:
         self.zero_enabled_var.set(True)
         self.zero_mode_var.set("marker")
         self.zero_marker_var.set("")
-        self.source_channel_var.set("CH1")
-        self.export_annotation_var.set("none")
-        self.export_marker_var.set("")
         export_defaults = {
             "corrected_csv": False, "corrected_png": True,
-            "dff_csv": True, "dff_png": True, "dff_svg": False,
-            "zscore_csv": True, "zscore_png": True, "zscore_svg": False,
+            "dff_csv": True, "dff_png": True, "zscore_csv": True, "zscore_png": True,
         }
         for key, value in export_defaults.items():
             self.export_vars[key].set(value)
@@ -724,8 +699,6 @@ class PretreatmentApp:
         self.fit_signatures = {"410": None, "470": None}
         self.fit_models = {"410": None, "470": None}
         self.fit_baseline_modes = {"410": "fit_constant", "470": "fit_constant"}
-        self.active_source_channel = "CH1"
-        self.channel_ranges = {}
         self.processed = None
         self.details = None
         self.normalized = False
@@ -743,7 +716,6 @@ class PretreatmentApp:
             list(self.fit_regions["410"]), list(self.fit_regions["470"]),
             self.fit_models["410"], self.fit_models["470"],
             self.fit_baseline_modes["410"], self.fit_baseline_modes["470"],
-            self.source_channel_var.get(),
         )
         if config.range_end_min <= config.range_start_min:
             raise ValueError("The valid range end must be greater than the start.")
@@ -833,14 +805,8 @@ class PretreatmentApp:
             if self.processed is not None:
                 for raw, smoothed in (("combined_signal", "combined_signal_smoothed"),
                                       ("analysis_trace", "analysis_trace_smoothed"),
-                                      ("corrected_470", "corrected_470_smoothed"),
-                                      ("corrected_410", "corrected_410_smoothed"),
                                       ("dff_percent", "dff_percent_smoothed"),
-                                      ("zscore", "zscore_smoothed"),
-                                      ("dff_470_percent", "dff_470_percent_smoothed"),
-                                      ("dff_410_percent", "dff_410_percent_smoothed"),
-                                      ("zscore_470", "zscore_470_smoothed"),
-                                      ("zscore_410", "zscore_410_smoothed")):
+                                      ("zscore", "zscore_smoothed")):
                     if raw in self.processed:
                         self.processed[smoothed] = self.smooth_array(self.processed[raw].to_numpy(float))
                 if self.normalized and self.details and self.details.get("normalization"):
@@ -872,24 +838,15 @@ class PretreatmentApp:
             self.reset_parameters_for_new_recording()
             self.folder = new_folder
             self.data, self.metadata = data, metadata
-            channels = sorted(
-                {str(column)[:-4] for column in data.columns if re.fullmatch(r"CH\d+-410", str(column))
-                 and f"{str(column)[:-4]}-470" in data.columns},
-                key=lambda name: int(name[2:]),
-            )
-            self.source_channel_box.configure(values=channels)
-            self.source_channel_var.set(channels[0])
-            self.active_source_channel = channels[0]
             self.original_markers = [dict(marker) for marker in markers]
             self.markers = [dict(marker) for marker in markers]
             self.vars["folder"].set(str(self.folder))
             self.vars["range_start"].set("0")
             recording_end = float(self.data["TimeStamp"].iloc[-1]) / 60000
-            self.channel_ranges = {channel: (0.0, recording_end) for channel in channels}
             self.vars["range_end"].set(f"{recording_end:.5f}")
             self.vars["norm_start"].set("0")
             self.vars["norm_end"].set(f"{min(1.0, recording_end):.5f}")
-            self.vars["output_name"].set(f"output_{self.folder.name}_{self.source_channel_var.get()}")
+            self.vars["output_name"].set(f"output_{self.folder.name}")
             self.refresh_markers(); self.method_changed()
             self.vars["status"].set(
                 "Data loaded. The current display is not smoothed or downsampled. Enter the baseline and set the fitting regions."
@@ -906,49 +863,6 @@ class PretreatmentApp:
             self.draw_processed()
         elif self.data is not None:
             self.draw_raw_preview()
-
-    def channel_changed(self) -> None:
-        """Switch channel atomically and force a clean raw-data preview."""
-        source = self.source_channel_box.get().strip() or self.source_channel_var.get().strip()
-        if self.data is None or not re.fullmatch(r"CH\d+", source):
-            return
-        required = {f"{source}-410", f"{source}-470"}
-        if not required.issubset(self.data.columns):
-            self.vars["status"].set(f"{source} is missing 410 or 470 data.")
-            return
-        # Preserve the range for the channel being left.  A channel that has
-        # not been visited starts at the full recording range instead of
-        # inheriting another channel's analysis interval.
-        try:
-            prior_start, prior_end = self.number("range_start"), self.number("range_end")
-            if prior_end > prior_start:
-                self.channel_ranges[self.active_source_channel] = (prior_start, prior_end)
-        except ValueError:
-            pass
-        recording_end = float(self.data["TimeStamp"].iloc[-1]) / 60000
-        start, end = self.channel_ranges.get(source, (0.0, recording_end))
-        self.channel_ranges[source] = (start, end)
-        self.vars["range_start"].set(f"{start:.5f}")
-        self.vars["range_end"].set(f"{end:.5f}")
-        self.active_source_channel = source
-        # Store the selected value before any redraw.  This avoids a queued
-        # canvas draw retaining CH1's processed artists during a CH2 switch.
-        self.source_channel_var.set(source)
-        self.processed = None
-        self.details = None
-        self.normalized = False
-        self.display_cache.clear()
-        self.fit_regions = {"410": [], "470": []}
-        self.fit_signatures = {"410": None, "470": None}
-        self.fit_models = {"410": None, "470": None}
-        self.fit_baseline_modes = {"410": "fit_constant", "470": "fit_constant"}
-        self.vars["fit410_status"].set("Not set")
-        self.vars["fit470_status"].set("Not set")
-        if self.folder is not None:
-            self.vars["output_name"].set(f"output_{self.folder.name}_{source}")
-        self.rebuild_axes()
-        self.draw_raw_preview(source)
-        self.vars["status"].set(f"{source} selected. Showing full raw traces; set its baselines and fitting regions.")
 
     def open_fit(self, channel: str) -> None:
         from tkinter import messagebox
@@ -1003,10 +917,7 @@ class PretreatmentApp:
             keys.append("410")
             keys.append(self.vars["combine"].get())
         if self.normalized:
-            if method == "fit_both":
-                keys.extend(["dff470", "dff410", "dff", "zscore470", "zscore410", "zscore"])
-            else:
-                keys.extend(["dff", "zscore"])
+            keys.extend(["dff", "zscore"])
         for selector in self.zoom_selectors:
             selector.set_active(False)
             selector.disconnect_events()
@@ -1333,10 +1244,9 @@ class PretreatmentApp:
         self.update_scale_readouts()
         self.canvas.draw_idle()
 
-    def draw_raw_preview(self, source: str | None = None) -> None:
+    def draw_raw_preview(self) -> None:
         if self.data is None:
             return
-        source = source or self.source_channel_var.get()
         try:
             start, end = self.number("range_start"), self.number("range_end")
         except Exception:
@@ -1352,13 +1262,13 @@ class PretreatmentApp:
         for ax, key in zip(self.axes, self.axis_keys):
             ax.clear()
             if key == "470":
-                values = subset[f"{source}-470"].to_numpy(float)
+                values = subset["CH1-470"].to_numpy(float)
                 ax.plot(x, values, color="#2E8B57", lw=self.line_width("raw470"),
-                        gid="raw470"); ax.set_ylabel(f"Raw {source} 470")
+                        gid="raw470"); ax.set_ylabel("Raw 470")
             elif key == "410":
-                values = subset[f"{source}-410"].to_numpy(float)
+                values = subset["CH1-410"].to_numpy(float)
                 ax.plot(x, values, color="#2F6FB0", lw=self.line_width("raw410"),
-                        gid="raw410"); ax.set_ylabel(f"Raw {source} 410")
+                        gid="raw410"); ax.set_ylabel("Raw 410")
             else:
                 ax.text(0.5, 0.5, "Apply fitting to display combined trace", ha="center", va="center", transform=ax.transAxes)
                 ax.set_ylabel(key)
@@ -1419,41 +1329,17 @@ class PretreatmentApp:
                 ax.axhline(0, color="#777777", lw=0.7, alpha=0.7)
                 ax.set_ylabel("dF/F0 (%)")
                 self.shade_normalization_baseline(ax)
-            elif key == "dff470":
-                ax.plot(x, self.display_values("dff_470_percent")[indices], color="#006D3C",
-                        lw=self.line_width("dff"), gid="dff")
-                ax.axhline(0, color="#777777", lw=0.7, alpha=0.7)
-                ax.set_ylabel("470 dF/F0 (%)")
-                self.shade_normalization_baseline(ax)
-            elif key == "dff410":
-                ax.plot(x, self.display_values("dff_410_percent")[indices], color="#15558D",
-                        lw=self.line_width("dff"), gid="dff")
-                ax.axhline(0, color="#777777", lw=0.7, alpha=0.7)
-                ax.set_ylabel("410 dF/F0 (%)")
-                self.shade_normalization_baseline(ax)
             elif key == "zscore":
-                ax.plot(x, self.display_values("zscore")[indices], color="#7B4B94",
+                ax.plot(x, self.display_values("zscore")[indices], color="#C05A2A",
                         lw=self.line_width("zscore"), gid="zscore")
                 ax.axhline(0, color="#777777", lw=0.7, alpha=0.7)
                 ax.set_ylabel("Z-score")
-                self.shade_normalization_baseline(ax)
-            elif key == "zscore470":
-                ax.plot(x, self.display_values("zscore_470")[indices], color="#006D3C",
-                        lw=self.line_width("zscore"), gid="zscore")
-                ax.axhline(0, color="#777777", lw=0.7, alpha=0.7)
-                ax.set_ylabel("470 Z-score")
-                self.shade_normalization_baseline(ax)
-            elif key == "zscore410":
-                ax.plot(x, self.display_values("zscore_410")[indices], color="#15558D",
-                        lw=self.line_width("zscore"), gid="zscore")
-                ax.axhline(0, color="#777777", lw=0.7, alpha=0.7)
-                ax.set_ylabel("410 Z-score")
                 self.shade_normalization_baseline(ax)
             self.style_axis(ax)
         model_title = f"470={self.fit_models['470']}"
         if "410" in self.axis_keys:
             model_title += f" | 410={self.fit_models['410']}"
-        self.figure.suptitle(f"RWD fiber pretreatment | {self.source_channel_var.get()} | {model_title}", fontsize=11)
+        self.figure.suptitle(f"RWD fiber pretreatment | {model_title}", fontsize=11)
         zero_time = self.details.get("normalization", {}).get("zero_time_min") if self.details and self.details.get("normalization") else None
         self.axes[-1].set_xlabel("Time relative to zero (min)" if zero_time is not None else "Recording time (min)")
         self.axes[-1].set_xlim(float(d[time_column].iloc[0]), float(d[time_column].iloc[-1]))
@@ -1623,8 +1509,7 @@ class PretreatmentApp:
             self.marker_list.insert(self.tk.END, f"[{source}] {marker['time_min']:.4f}  {marker['name']}")
         choices = self.marker_choices()
         for box, variable in ((getattr(self, "norm_marker_box", None), self.norm_marker_var),
-                              (getattr(self, "zero_marker_box", None), self.zero_marker_var),
-                              (getattr(self, "export_marker_box", None), self.export_marker_var)):
+                              (getattr(self, "zero_marker_box", None), self.zero_marker_var)):
             if box is not None:
                 box.configure(values=choices)
             if choices and variable.get() not in choices:
@@ -1778,36 +1663,7 @@ class PretreatmentApp:
         axes[0].set_title(title)
         axes[-1].set_xlabel("Time relative to zero (min)" if zero_time is not None else "Recording time (min)")
         axes[-1].set_xlim(float(time_min[0]), float(time_min[-1]))
-        save_args: dict[str, Any] = {"facecolor": "white", "format": path.suffix.lstrip(".")}
-        if path.suffix.lower() == ".png":
-            save_args["dpi"] = 220
-        # Keep labels as text in SVG instead of converting glyphs to outlines,
-        # so Illustrator can edit both the annotation and the vector curves.
-        if path.suffix.lower() == ".svg":
-            from matplotlib import rc_context
-            with rc_context({"svg.fonttype": "none"}):
-                figure.savefig(path, **save_args)
-        else:
-            figure.savefig(path, **save_args)
-
-    def resolve_export_annotation(self) -> tuple[tuple[float, float] | None, str]:
-        """Return an export highlight in the plotted time coordinate."""
-        mode = self.export_annotation_var.get()
-        if mode == "none":
-            return None, "none"
-        zero_time = (self.details.get("normalization", {}).get("zero_time_min")
-                     if self.details and self.details.get("normalization") else None)
-        shift = float(zero_time) if zero_time is not None else 0.0
-        if mode == "baseline":
-            start, end, _definition = self.resolve_baseline_interval()
-            return (start - shift, end - shift), "normalization_baseline"
-        if mode == "marker_after":
-            start = self.marker_time_from_choice(self.export_marker_var.get())
-            duration = self.number("export_window_duration")
-            if duration <= 0:
-                raise ValueError("The marker-window duration must be greater than 0.")
-            return (start - shift, start + duration - shift), "marker_after_window"
-        raise ValueError("Select a valid export annotation mode.")
+        figure.savefig(path, dpi=220, facecolor="white")
 
     def next_output_directory(self) -> Path:
         if self.folder is None:
@@ -1838,7 +1694,7 @@ class PretreatmentApp:
         frame = self.processed.iloc[indices].copy().reset_index(drop=True)
         signal_columns = [
             "corrected_470", "corrected_410", "combined_signal", "analysis_trace",
-            "dff_percent", "zscore", "dff_470_percent", "dff_410_percent", "zscore_470", "zscore_410",
+            "dff_percent", "zscore",
         ]
         for column in signal_columns:
             if column not in self.processed:
@@ -1847,11 +1703,6 @@ class PretreatmentApp:
             if self.applied_smooth_seconds > 0:
                 frame[f"{column}_unsmoothed"] = original
             frame[column] = self.display_values(column)[indices]
-        limits, _label = self.resolve_export_annotation()
-        frame["export_window"] = 0
-        if limits is not None:
-            plotted_time = frame["relative_time_min" if self.normalized else "time_min"].to_numpy(float)
-            frame.loc[(plotted_time >= limits[0]) & (plotted_time <= limits[1]), "export_window"] = 1
         return frame, indices
 
     def save_results(self) -> None:
@@ -1863,9 +1714,7 @@ class PretreatmentApp:
         if not any(selections.values()):
             messagebox.showinfo("No Output Selected", "Select at least one CSV or PNG output.")
             return
-        normalization_requested = any(selections[key] for key in (
-            "dff_csv", "dff_png", "dff_svg", "zscore_csv", "zscore_png", "zscore_svg"
-        ))
+        normalization_requested = any(selections[key] for key in ("dff_csv", "dff_png", "zscore_csv", "zscore_png"))
         if normalization_requested and not self.normalized:
             messagebox.showinfo("Normalization Required", "Set the baseline interval and calculate dF/F0 and Z-score first.")
             return
@@ -1886,14 +1735,8 @@ class PretreatmentApp:
             self.display_cache.clear()
             for raw, smoothed in (("combined_signal", "combined_signal_smoothed"),
                                   ("analysis_trace", "analysis_trace_smoothed"),
-                                  ("corrected_470", "corrected_470_smoothed"),
-                                  ("corrected_410", "corrected_410_smoothed"),
                                   ("dff_percent", "dff_percent_smoothed"),
-                                  ("zscore", "zscore_smoothed"),
-                                  ("dff_470_percent", "dff_470_percent_smoothed"),
-                                  ("dff_410_percent", "dff_410_percent_smoothed"),
-                                  ("zscore_470", "zscore_470_smoothed"),
-                                  ("zscore_410", "zscore_410_smoothed")):
+                                  ("zscore", "zscore_smoothed")):
                 self.processed[smoothed] = self.smooth_array(self.processed[raw].to_numpy(float))
             export_frame, _export_indices = self.prepared_export_frame()
             output = self.next_output_directory()
@@ -1908,44 +1751,29 @@ class PretreatmentApp:
                     corrected_columns.append("corrected_410")
                     if "corrected_410_unsmoothed" in export_frame:
                         corrected_columns.append("corrected_410_unsmoothed")
-                    corrected_columns.append("combined_signal")
-                    if "combined_signal_unsmoothed" in export_frame:
-                        corrected_columns.append("combined_signal_unsmoothed")
                 corrected_columns.append("analysis_trace")
                 if "analysis_trace_unsmoothed" in export_frame:
                     corrected_columns.append("analysis_trace_unsmoothed")
-                corrected_columns.append("export_window")
                 export_frame[corrected_columns].to_csv(
                     output / "corrected_fluorescence_trace.csv", index=False, float_format="%.9g"
                 )
             if selections["dff_csv"]:
                 dff_columns = time_columns + ["dff_percent"]
-                if self.vars["method"].get() == "fit_both":
-                    dff_columns.extend(["dff_470_percent", "dff_410_percent"])
-                    for column in ("dff_470_percent_unsmoothed", "dff_410_percent_unsmoothed"):
-                        if column in export_frame:
-                            dff_columns.append(column)
                 if "dff_percent_unsmoothed" in export_frame:
                     dff_columns.append("dff_percent_unsmoothed")
-                dff_columns.extend(["normalization_baseline", "export_window"])
+                dff_columns.append("normalization_baseline")
                 export_frame[dff_columns].to_csv(
                     output / "dFF0_trace.csv", index=False, float_format="%.9g"
                 )
             if selections["zscore_csv"]:
                 zscore_columns = time_columns + ["zscore"]
-                if self.vars["method"].get() == "fit_both":
-                    zscore_columns.extend(["zscore_470", "zscore_410"])
-                    for column in ("zscore_470_unsmoothed", "zscore_410_unsmoothed"):
-                        if column in export_frame:
-                            zscore_columns.append(column)
                 if "zscore_unsmoothed" in export_frame:
                     zscore_columns.append("zscore_unsmoothed")
-                zscore_columns.extend(["normalization_baseline", "export_window"])
+                zscore_columns.append("normalization_baseline")
                 export_frame[zscore_columns].to_csv(
                     output / "zscore_trace.csv", index=False, float_format="%.9g"
                 )
 
-            annotation_limits, annotation_label = self.resolve_export_annotation()
             if selections["corrected_png"]:
                 corrected_panels = [
                     ("Corrected 470", self.display_values("corrected_470"), "#006D3C", "corrected470")
@@ -1957,40 +1785,26 @@ class PretreatmentApp:
                     corrected_panels.append((self.details.get("combined_label") or "Analysis trace",
                                              self.display_values("analysis_trace"), "#7B4B94", "combined"))
                 self.save_trace_png(output / "corrected_fluorescence_trace.png", corrected_panels,
-                                    "Corrected fluorescence traces", annotation_limits)
-            dff_panels = [("Ratio dF/F0 (%)", self.display_values("dff_percent"), "#7B4B94", "dff")]
-            if self.vars["method"].get() == "fit_both":
-                dff_panels = [
-                    ("470 dF/F0 (%)", self.display_values("dff_470_percent"), "#006D3C", "dff"),
-                    ("410 dF/F0 (%)", self.display_values("dff_410_percent"), "#15558D", "dff"),
-                    *dff_panels,
-                ]
+                                    "Corrected fluorescence traces")
+            normalization = self.details.get("normalization") if self.details else None
+            if normalization:
+                zero_time = normalization.get("zero_time_min")
+                shift = float(zero_time) if zero_time is not None else 0.0
+                baseline_limits = (normalization["baseline_start_min"] - shift,
+                                   normalization["baseline_end_min"] - shift)
+            else:
+                baseline_limits = None
             if selections["dff_png"]:
                 self.save_trace_png(
                     output / "dFF0_trace.png",
-                    dff_panels, "dF/F0", annotation_limits,
+                    [("dF/F0 (%)", self.display_values("dff_percent"), "#7B4B94", "dff")],
+                    "dF/F0", baseline_limits,
                 )
-            if selections["dff_svg"]:
-                self.save_trace_png(
-                    output / "dFF0_trace.svg",
-                    dff_panels, "dF/F0", annotation_limits,
-                )
-            z_panels = [("Ratio Z-score", self.display_values("zscore"), "#7B4B94", "zscore")]
-            if self.vars["method"].get() == "fit_both":
-                z_panels = [
-                    ("470 Z-score", self.display_values("zscore_470"), "#006D3C", "zscore"),
-                    ("410 Z-score", self.display_values("zscore_410"), "#15558D", "zscore"),
-                    *z_panels,
-                ]
             if selections["zscore_png"]:
                 self.save_trace_png(
                     output / "zscore_trace.png",
-                    z_panels, "Z-score", annotation_limits,
-                )
-            if selections["zscore_svg"]:
-                self.save_trace_png(
-                    output / "zscore_trace.svg",
-                    z_panels, "Z-score", annotation_limits,
+                    [("Z-score", self.display_values("zscore"), "#C05A2A", "zscore")],
+                    "Z-score", baseline_limits,
                 )
 
             marker_values = np.zeros(len(export_frame), dtype=int)
@@ -2018,7 +1832,6 @@ class PretreatmentApp:
                 "source_folder": str(self.folder), "source_files_modified": False,
                 "processing": asdict(self.current_config()), "fit_details": self.details,
                 "selected_outputs": selections,
-                "export_annotation": {"mode": annotation_label, "limits_in_display_min": annotation_limits},
                 "display_processing": {
                     "smooth_enabled": self.applied_smooth_seconds > 0,
                     "smooth_seconds": self.smoothing_seconds(),
