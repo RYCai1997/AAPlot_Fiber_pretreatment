@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import uuid
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,7 @@ class ProcessingConfig:
     fit_model_470: str | None = None
     fit_baseline_mode_410: str | None = "fit_constant"
     fit_baseline_mode_470: str | None = "fit_constant"
+    source_channel: str = "CH1"
 
 
 def load_recording(folder: Path) -> tuple[pd.DataFrame, list[dict[str, Any]], str]:
@@ -39,12 +41,23 @@ def load_recording(folder: Path) -> tuple[pd.DataFrame, list[dict[str, Any]], st
         metadata = handle.readline().strip()
     data = pd.read_csv(path, skiprows=1)
     data = data.loc[:, ~data.columns.astype(str).str.startswith("Unnamed")]
+    # CH1 is mandatory for backwards compatibility.  Any additional CH<n>
+    # pair is accepted, so the GUI can grow from two to more acquisition
+    # channels without changing the file reader again.
     required = ["TimeStamp", "CH1-410", "CH1-470"]
     missing = [column for column in required if column not in data]
     if missing:
         raise ValueError(f"Fluorescence.csv is missing required columns: {', '.join(missing)}")
     for column in required:
         data[column] = pd.to_numeric(data[column], errors="coerce")
+    prefixes = sorted({str(column)[:-4] for column in data.columns
+                       if re.fullmatch(r"CH\d+-410", str(column))})
+    for prefix in prefixes:
+        paired = [f"{prefix}-410", f"{prefix}-470"]
+        if any(column not in data for column in paired):
+            raise ValueError(f"{prefix} data must include both {paired[0]} and {paired[1]} columns.")
+        for column in paired:
+            data[column] = pd.to_numeric(data[column], errors="coerce")
     data = data.dropna(subset=required).sort_values("TimeStamp").reset_index(drop=True)
     if len(data) < 20:
         raise ValueError("Fewer than 20 valid data points are available.")
@@ -311,8 +324,12 @@ def process_data(data: pd.DataFrame, config: ProcessingConfig) -> tuple[pd.DataF
     time_min = time_s / 60
     dt = np.diff(time_s)
     sample_rate = float(1 / np.median(dt[dt > 0]))
-    raw410 = subset["CH1-410"].to_numpy(float)
-    raw470 = subset["CH1-470"].to_numpy(float)
+    source = config.source_channel
+    columns = [f"{source}-410", f"{source}-470"]
+    if any(column not in subset for column in columns):
+        raise ValueError(f"{source} requires columns {columns[0]} and {columns[1]}.")
+    raw410 = subset[columns[0]].to_numpy(float)
+    raw470 = subset[columns[1]].to_numpy(float)
     adjusted410 = raw410 - config.offset_410
     adjusted470 = raw470 - config.offset_470
 
@@ -390,6 +407,7 @@ def process_data(data: pd.DataFrame, config: ProcessingConfig) -> tuple[pd.DataF
         "fit_470_parameters": parameters470,
         "analysis_reference_from_user_baselines": float(analysis_reference),
         "normalization": None,
+        "source_channel": source,
         "definitions": {
             "baseline": "user value is either a fixed model constant or the initial estimate for a fitted constant, as recorded per channel",
             "corrected_channel": "(raw - offset) / independently fitted bleaching * user baseline",
@@ -436,6 +454,35 @@ def calculate_normalized_traces(
     result["zscore_smoothed"] = pd.Series(zscore).rolling(
         smooth_points, center=True, min_periods=1
     ).mean().to_numpy()
+    # In two-wavelength mode, retain the individual corrected traces as
+    # first-class analysis outputs rather than normalizing only their ratio.
+    # The legacy dff_percent/zscore names continue to mean the analysis trace.
+    for label, column in (("470", "corrected_470"), ("410", "corrected_410")):
+        values = result[column].to_numpy(float)
+        valid_baseline = baseline_mask & np.isfinite(values)
+        if valid_baseline.sum() < 20:
+            result[f"dff_{label}_percent"] = np.full(len(result), np.nan)
+            result[f"zscore_{label}"] = np.full(len(result), np.nan)
+            result[f"dff_{label}_percent_smoothed"] = np.full(len(result), np.nan)
+            result[f"zscore_{label}_smoothed"] = np.full(len(result), np.nan)
+            continue
+        channel_f0 = float(np.mean(values[valid_baseline]))
+        if not np.isfinite(channel_f0) or np.isclose(channel_f0, 0):
+            raise ValueError(f"F0 for corrected {label} is zero or invalid.")
+        channel_dff = 100.0 * (values - channel_f0) / channel_f0
+        baseline_channel_dff = channel_dff[valid_baseline]
+        channel_sd = float(np.std(baseline_channel_dff, ddof=1))
+        if not np.isfinite(channel_sd) or channel_sd <= np.finfo(float).eps:
+            raise ValueError(f"The baseline standard deviation for corrected {label} is zero.")
+        channel_z = (channel_dff - float(np.mean(baseline_channel_dff))) / channel_sd
+        result[f"dff_{label}_percent"] = channel_dff
+        result[f"zscore_{label}"] = channel_z
+        result[f"dff_{label}_percent_smoothed"] = pd.Series(channel_dff).rolling(
+            smooth_points, center=True, min_periods=1
+        ).mean().to_numpy()
+        result[f"zscore_{label}_smoothed"] = pd.Series(channel_z).rolling(
+            smooth_points, center=True, min_periods=1
+        ).mean().to_numpy()
     result["normalization_baseline"] = baseline_mask.astype(int)
     if zero_time_min is None:
         result["relative_time_min"] = time_min
