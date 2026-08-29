@@ -501,3 +501,149 @@ def calculate_normalized_traces(
         "zero_time_min": None if zero_time_min is None else float(zero_time_min),
     }
     return result, details
+
+
+def calculate_event_locked_traces(
+    processed: pd.DataFrame,
+    marker_times_min: list[float],
+    marker_name: str,
+    pre_seconds: float,
+    post_seconds: float,
+    baseline_seconds: float,
+    signal_column: str = "analysis_trace",
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
+    """Split a corrected signal around repeated events and normalize each trial independently."""
+    if signal_column not in processed:
+        raise ValueError(f"The corrected signal column '{signal_column}' is unavailable.")
+    if pre_seconds <= 0 or post_seconds <= 0:
+        raise ValueError("The pre-marker and post-marker trace durations must both be greater than 0 seconds.")
+    if baseline_seconds <= 0:
+        raise ValueError("The event baseline duration must be greater than 0 seconds.")
+    if baseline_seconds > pre_seconds:
+        raise ValueError("The event baseline duration cannot exceed the pre-marker trace duration.")
+    if not marker_times_min:
+        raise ValueError(f"No markers named '{marker_name}' are available.")
+
+    time_s = processed["original_time_s"].to_numpy(float)
+    signal = processed[signal_column].to_numpy(float)
+    valid_source = np.isfinite(time_s) & np.isfinite(signal)
+    time_s, signal = time_s[valid_source], signal[valid_source]
+    order = np.argsort(time_s)
+    time_s, signal = time_s[order], signal[order]
+    unique = np.r_[True, np.diff(time_s) > 0]
+    time_s, signal = time_s[unique], signal[unique]
+    if len(time_s) < 3:
+        raise ValueError("Fewer than three finite corrected-signal samples are available for event analysis.")
+    positive_dt = np.diff(time_s)
+    positive_dt = positive_dt[positive_dt > 0]
+    sample_interval = float(np.median(positive_dt))
+    if not np.isfinite(sample_interval) or sample_interval <= 0:
+        raise ValueError("The signal sampling interval could not be determined.")
+
+    pre_point_count = max(2, int(round(pre_seconds / sample_interval)) + 1)
+    post_point_count = max(2, int(round(post_seconds / sample_interval)) + 1)
+    relative_time = np.concatenate((
+        np.linspace(-float(pre_seconds), 0.0, pre_point_count)[:-1],
+        np.linspace(0.0, float(post_seconds), post_point_count),
+    ))
+    baseline_mask = (relative_time >= -float(baseline_seconds)) & (relative_time < 0)
+    if baseline_mask.sum() < 2:
+        raise ValueError(
+            "The event baseline contains fewer than two samples. Increase the baseline duration "
+            "or use data with a higher sampling rate."
+        )
+
+    trial_rows: list[pd.DataFrame] = []
+    excluded: list[dict[str, Any]] = []
+    trial_arrays: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
+    for event_index, marker_time_min in enumerate(marker_times_min, start=1):
+        marker_time_s = float(marker_time_min) * 60.0
+        absolute_time = marker_time_s + relative_time
+        if absolute_time[0] < time_s[0] or absolute_time[-1] > time_s[-1]:
+            excluded.append({
+                "event_index": event_index,
+                "marker_time_min": float(marker_time_min),
+                "reason": "the requested trace window extends outside the corrected recording",
+            })
+            continue
+        trace = np.interp(absolute_time, time_s, signal)
+        baseline_values = trace[baseline_mask]
+        f0 = float(np.mean(baseline_values))
+        if not np.isfinite(f0) or np.isclose(f0, 0):
+            excluded.append({
+                "event_index": event_index,
+                "marker_time_min": float(marker_time_min),
+                "reason": "the trial baseline mean is zero or invalid",
+            })
+            continue
+        dff = 100.0 * (trace - f0) / f0
+        baseline_dff = dff[baseline_mask]
+        baseline_center = float(np.mean(baseline_dff))
+        baseline_sd = float(np.std(baseline_dff, ddof=1))
+        if not np.isfinite(baseline_sd) or baseline_sd <= np.finfo(float).eps:
+            excluded.append({
+                "event_index": event_index,
+                "marker_time_min": float(marker_time_min),
+                "reason": "the trial baseline standard deviation is zero or invalid",
+            })
+            continue
+        zscore = (dff - baseline_center) / baseline_sd
+        trial_number = len(trial_rows) + 1
+        trial_rows.append(pd.DataFrame({
+            "trial": trial_number,
+            "source_event_index": event_index,
+            "marker_name": marker_name,
+            "marker_time_min": float(marker_time_min),
+            "relative_time_s": relative_time,
+            "corrected_signal": trace,
+            "dff_percent": dff,
+            "zscore": zscore,
+            "event_baseline": baseline_mask.astype(int),
+            "f0": f0,
+            "baseline_dff_sd": baseline_sd,
+        }))
+        trial_arrays.append((trace, dff, zscore))
+
+    if not trial_rows:
+        reasons = "; ".join(item["reason"] for item in excluded[:3])
+        raise ValueError(f"No complete event trials could be analyzed. {reasons}")
+
+    trials = pd.concat(trial_rows, ignore_index=True)
+    corrected_stack = np.vstack([item[0] for item in trial_arrays])
+    dff_stack = np.vstack([item[1] for item in trial_arrays])
+    zscore_stack = np.vstack([item[2] for item in trial_arrays])
+    trial_count = len(trial_arrays)
+
+    def mean_and_sem(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        mean = np.mean(values, axis=0)
+        if values.shape[0] < 2:
+            return mean, np.full(values.shape[1], np.nan)
+        return mean, np.std(values, axis=0, ddof=1) / np.sqrt(values.shape[0])
+
+    corrected_mean, corrected_sem = mean_and_sem(corrected_stack)
+    dff_mean, dff_sem = mean_and_sem(dff_stack)
+    zscore_mean, zscore_sem = mean_and_sem(zscore_stack)
+    average = pd.DataFrame({
+        "relative_time_s": relative_time,
+        "n_trials": trial_count,
+        "corrected_signal_mean": corrected_mean,
+        "corrected_signal_sem": corrected_sem,
+        "dff_percent_mean": dff_mean,
+        "dff_percent_sem": dff_sem,
+        "zscore_mean": zscore_mean,
+        "zscore_sem": zscore_sem,
+        "event_baseline": baseline_mask.astype(int),
+    })
+    details = {
+        "marker_name": marker_name,
+        "requested_events": len(marker_times_min),
+        "included_trials": trial_count,
+        "excluded_events": excluded,
+        "pre_seconds": float(pre_seconds),
+        "post_seconds": float(post_seconds),
+        "baseline_seconds": float(baseline_seconds),
+        "sample_interval_seconds": sample_interval,
+        "signal_column": signal_column,
+        "normalization": "each trial uses its own pre-marker baseline",
+    }
+    return trials, average, details

@@ -12,6 +12,7 @@ This folder is a standalone interactive pretreatment program. Double-click `run_
 - The user enters offset and baseline values directly. There is no automatic first-60-second baseline estimate.
 - Fitting windows use `fit_constant`: the user's baseline is the initial estimate for a freely fitted constant term. The main window no longer has a redundant model selector; each channel's model is chosen in its own fitting window.
 - Corrected channel: `(raw - offset) / independently fitted bleaching × user baseline`.
+- Immediately after loading, the third plot previews the direct raw `470/410` ratio or raw `470-410` subtraction. The **Combine Channels** selector switches this preview without requiring fitting.
 - Method `fit_both` independently fits 470 and 410, then calculates corrected `470/410` ratio or corrected `470-410` subtraction.
 - Method `fit_470_only` fits and displays 470 only; the 410 panel is hidden.
 - The program does not automatically display “470 change from baseline.”
@@ -34,7 +35,7 @@ Changing effective range, channel offset, channel baseline, or fit model invalid
 
 - 470 and 410 always use separate plots.
 - In 470-only mode, the 410 plot is absent.
-- Ratio mode adds a dedicated corrected-ratio plot; subtraction mode adds a corrected-difference plot.
+- Before fitting, ratio mode adds a direct raw `470/410` plot and subtraction mode adds a direct raw `470-410` plot. After fitting, the same panel displays the corresponding corrected result.
 - 470 fluorescence is green, 410 fluorescence is blue, and fitted curves are red dashed lines.
 - After fitting, original offset-adjusted fluorescence and corrected fluorescence can be overlaid or displayed individually.
 - Every raw, fitted, corrected, combined, dF/F0, and Z-score curve has an independent thickness setting below the plot area. The fitting window separately controls signal and fit line widths.
@@ -98,6 +99,25 @@ When the corresponding CSV output is selected, the save folder also contains the
 Each contains one comma-separated `.txt` file whose first three columns are `Time` in seconds, `Signal`, and `Marker`. When time zero is enabled, this `Time` column is relative time; full CSV exports still retain original and relative time columns. This is the format read by `D:\Coding\AAPlot\GUI\fiber_trace_spike2_analysis_batch_gui.py`. Signal types are separated into folders so AAPlot does not interpret them as separate animals in one batch.
 
 For ratio/subtraction processing, the corrected analysis trace is the corrected ratio/difference. For 470-only processing, it is corrected 470. Normalization always uses the independently specified normalization baseline interval, not the exponential fitting regions.
+
+## Marker-aligned event analysis
+
+The **Event Analysis** tab appears immediately after **dF/F0 & Z-score**. It analyzes repeated stimulation events after bleaching correction:
+
+1. Select a marker name. Every marker with exactly that name is treated as one repeated trial.
+2. Enter the trace duration before and after the marker in seconds (for example, 10 s before and 40 s after).
+3. Enter the baseline duration immediately before the marker in seconds (for example, 2 s uses `-2 s` to `0 s`). The baseline must not be longer than the pre-marker trace interval.
+4. Click **Calculate Event dF/F0 & Z-score**.
+
+Each complete trial is interpolated onto a common time axis with the marker at 0 s. Its own pre-marker baseline is used to calculate its dF/F0 and Z-score. Trials whose requested window extends outside the corrected recording, or whose baseline is invalid, are excluded and reported in the event status. The right side shows four panels: all trial dF/F0 traces, average dF/F0 with SEM, all trial Z-score traces, and average Z-score with SEM. The shaded interval is the baseline and the red dashed line is marker time 0.
+
+Event analysis uses the current corrected analysis trace and the smoothing duration that has actually been applied. Changing correction, the channel combination, smoothing, or the marker list invalidates the event result and requires recalculation.
+
+Under **Export Results**, event output can be selected independently from whole-recording normalization output:
+
+- `event_aligned_trials.csv`: long-format corrected signal, dF/F0, and Z-score for every included trial.
+- `event_aligned_average.csv`: mean and SEM for corrected signal, dF/F0, and Z-score.
+- `event_aligned_dFF_zscore.png` or `.svg`: all trials and average ± SEM in four panels.
 
 ## Author and development
 

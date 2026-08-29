@@ -16,6 +16,7 @@ import pandas as pd
 
 from processing import (
     ProcessingConfig,
+    calculate_event_locked_traces,
     calculate_normalized_traces,
     fit_bleaching,
     load_recording,
@@ -32,6 +33,8 @@ DEFAULT_STRINGS = {
     "fit470_status": "Not set", "norm_start": "0", "norm_end": "1",
     "norm_pre_duration": "5", "zero_time": "0", "downsample_value": "1",
     "export_window_duration": "5",
+    "event_pre_seconds": "10", "event_post_seconds": "40", "event_baseline_seconds": "2",
+    "event_status": "Select a marker name after loading data.",
     "x_start": "", "x_span": "", "x_end": "", "output_name": "",
     "marker_time": "0", "marker_name": "marker", "status": "Select a recording folder.",
 }
@@ -404,6 +407,10 @@ class PretreatmentApp:
         self.axes: list[Any] = []
         self.axis_keys: list[str] = []
         self.normalized = False
+        self.event_trials: pd.DataFrame | None = None
+        self.event_average: pd.DataFrame | None = None
+        self.event_details: dict[str, Any] | None = None
+        self.event_view_active = False
         self.hover_x_lines: list[Any] = []
         self.hover_y_lines: list[Any] = []
         self.hover_y_labels: list[Any] = []
@@ -425,6 +432,9 @@ class PretreatmentApp:
         self.line_width_vars = {key: tk.DoubleVar(value=1.0) for key in LINE_WIDTH_LABELS}
         self.line_width_selector_var = tk.StringVar(value=LINE_WIDTH_LABELS["raw470"])
         self.line_width_text = tk.StringVar(value="1.0")
+        self.x_left_label_var = tk.StringVar(value="X Left (min)")
+        self.x_range_label_var = tk.StringVar(value="X Range (min)")
+        self.x_right_label_var = tk.StringVar(value="X Right (min)")
         self.smooth_enabled_var = tk.BooleanVar(value=True)
         self.downsample_enabled_var = tk.BooleanVar(value=True)
         self.downsample_mode_var = tk.StringVar(value="seconds")
@@ -438,12 +448,15 @@ class PretreatmentApp:
         self.zero_mode_var = tk.StringVar(value="marker")
         self.zero_marker_var = tk.StringVar(value="")
         self.source_channel_var = tk.StringVar(value="CH1")
+        self.event_marker_var = tk.StringVar(value="")
         self.export_annotation_var = tk.StringVar(value="none")
         self.export_marker_var = tk.StringVar(value="")
         self.export_vars = {
             "corrected_csv": tk.BooleanVar(value=False), "corrected_png": tk.BooleanVar(value=True),
             "dff_csv": tk.BooleanVar(value=True), "dff_png": tk.BooleanVar(value=True), "dff_svg": tk.BooleanVar(value=False),
             "zscore_csv": tk.BooleanVar(value=True), "zscore_png": tk.BooleanVar(value=True), "zscore_svg": tk.BooleanVar(value=False),
+            "event_csv": tk.BooleanVar(value=False), "event_png": tk.BooleanVar(value=False),
+            "event_svg": tk.BooleanVar(value=False),
         }
 
         palette = {
@@ -492,9 +505,13 @@ class PretreatmentApp:
                   style="HeaderSubtitle.TLabel").pack(anchor="w", pady=(1, 0))
         notebook = ttk.Notebook(controls)
         notebook.pack(fill=tk.BOTH, expand=True)
-        data_tab, display_tab, export_tab = ttk.Frame(notebook, padding=12), ttk.Frame(notebook, padding=12), ttk.Frame(notebook, padding=12)
+        data_tab = ttk.Frame(notebook, padding=12)
+        display_tab = ttk.Frame(notebook, padding=12)
+        event_tab = ttk.Frame(notebook, padding=12)
+        export_tab = ttk.Frame(notebook, padding=12)
         notebook.add(data_tab, text="Data & Fitting")
         notebook.add(display_tab, text="dF/F0 & Z-score")
+        notebook.add(event_tab, text="Event Analysis")
         notebook.add(export_tab, text="Export Results")
 
         row = 0
@@ -517,6 +534,7 @@ class PretreatmentApp:
         ttk.Label(data_tab, text="Combine Channels").grid(row=row, column=0, sticky="w")
         self.combine_box = ttk.Combobox(data_tab, textvariable=self.vars["combine"], values=["ratio", "subtraction"], state="readonly", width=19)
         self.combine_box.grid(row=row, column=1, sticky="ew"); row += 1
+        self.combine_box.bind("<<ComboboxSelected>>", lambda _event: self.combine_changed())
         ttk.Button(data_tab, text="Configure 470 Fit...", command=lambda: self.open_fit("470")).grid(row=row, column=0, sticky="ew", pady=2)
         ttk.Label(data_tab, textvariable=self.vars["fit470_status"], wraplength=180).grid(row=row, column=1, sticky="w"); row += 1
         self.fit410_button = ttk.Button(data_tab, text="Configure 410 Fit...", command=lambda: self.open_fit("410"))
@@ -583,16 +601,44 @@ class PretreatmentApp:
         display_tab.columnconfigure(1, weight=1)
 
         row = 0
+        row = self.section(event_tab, row, "Marker-Aligned Trial Analysis")
+        ttk.Label(event_tab, text="Marker Name").grid(row=row, column=0, sticky="w")
+        self.event_marker_box = ttk.Combobox(
+            event_tab, textvariable=self.event_marker_var, state="readonly", width=20,
+        )
+        self.event_marker_box.grid(row=row, column=1, sticky="ew"); row += 1
+        row = self.entry(event_tab, row, "Trace Before Marker (s)", "event_pre_seconds")
+        row = self.entry(event_tab, row, "Trace After Marker (s)", "event_post_seconds")
+        row = self.entry(event_tab, row, "Baseline Before Marker (s)", "event_baseline_seconds")
+        ttk.Label(
+            event_tab,
+            text="All markers with the selected name are treated as repeated trials. "
+                 "Each trial is normalized using its own interval immediately before time 0.",
+            wraplength=380, style="Hint.TLabel",
+        ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(5, 8)); row += 1
+        ttk.Button(
+            event_tab, text="Calculate Event dF/F0 & Z-score",
+            command=self.calculate_event_analysis, style="Accent.TButton",
+        ).grid(row=row, column=0, columnspan=2, sticky="ew", pady=(3, 5)); row += 1
+        ttk.Label(
+            event_tab, textvariable=self.vars["event_status"], wraplength=380, style="Status.TLabel",
+        ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        event_tab.columnconfigure(1, weight=1)
+
+        row = 0
         row = self.section(export_tab, row, "Output Files")
         export_labels = [("corrected_csv", "Corrected Fluorescence CSV"), ("corrected_png", "Corrected Fluorescence PNG"),
                          ("dff_csv", "dF/F0 CSV"), ("dff_png", "dF/F0 PNG"),
                          ("dff_svg", "dF/F0 SVG (Vector)"), ("zscore_csv", "Z-score CSV"),
-                         ("zscore_png", "Z-score PNG"), ("zscore_svg", "Z-score SVG (Vector)")]
+                         ("zscore_png", "Z-score PNG"), ("zscore_svg", "Z-score SVG (Vector)"),
+                         ("event_csv", "Event Trials + Average CSV"),
+                         ("event_png", "Event Trials + Average PNG"),
+                         ("event_svg", "Event Trials + Average SVG")]
         for index, (key, label) in enumerate(export_labels):
             ttk.Checkbutton(export_tab, text=label, variable=self.export_vars[key]).grid(
                 row=row + index // 2, column=index % 2, sticky="w", pady=2
             )
-        row += 4
+        row += (len(export_labels) + 1) // 2
         row = self.section(export_tab, row, "Trace Annotation")
         annotation_modes = ttk.Frame(export_tab); annotation_modes.grid(row=row, column=0, columnspan=2, sticky="w"); row += 1
         for text, value in [("None", "none"), ("Normalization Baseline", "baseline"), ("After Marker Window", "marker_after")]:
@@ -634,13 +680,13 @@ class PretreatmentApp:
                                           command=self.line_width_changed, length=180)
         self.line_width_scale.pack(side=tk.LEFT, padx=(6, 4))
         ttk.Label(width_row, textvariable=self.line_width_text, width=4).pack(side=tk.LEFT)
-        ttk.Label(axis_row, text="X Left (min)").pack(side=tk.LEFT)
+        ttk.Label(axis_row, textvariable=self.x_left_label_var).pack(side=tk.LEFT)
         x_start_entry = ttk.Entry(axis_row, textvariable=self.vars["x_start"], width=9)
         x_start_entry.pack(side=tk.LEFT, padx=5)
-        ttk.Label(axis_row, text="X Range (min)").pack(side=tk.LEFT)
+        ttk.Label(axis_row, textvariable=self.x_range_label_var).pack(side=tk.LEFT)
         x_span_entry = ttk.Entry(axis_row, textvariable=self.vars["x_span"], width=9)
         x_span_entry.pack(side=tk.LEFT, padx=5)
-        ttk.Label(axis_row, text="X Right (min)").pack(side=tk.LEFT)
+        ttk.Label(axis_row, textvariable=self.x_right_label_var).pack(side=tk.LEFT)
         x_end_entry = ttk.Entry(axis_row, textvariable=self.vars["x_end"], width=9)
         x_end_entry.pack(side=tk.LEFT, padx=5)
         for entry, changed in ((x_start_entry, "start"), (x_span_entry, "span"), (x_end_entry, "end")):
@@ -680,6 +726,11 @@ class PretreatmentApp:
             raise ValueError(f"{key} must be a finite number.")
         return value
 
+    def set_x_axis_unit(self, unit: str) -> None:
+        self.x_left_label_var.set(f"X Left ({unit})")
+        self.x_range_label_var.set(f"X Range ({unit})")
+        self.x_right_label_var.set(f"X Right ({unit})")
+
     def reset_parameters_for_new_recording(self) -> None:
         """Restore every analysis, display and export option to its startup default."""
         for key, value in DEFAULT_STRINGS.items():
@@ -700,12 +751,14 @@ class PretreatmentApp:
         self.zero_mode_var.set("marker")
         self.zero_marker_var.set("")
         self.source_channel_var.set("CH1")
+        self.event_marker_var.set("")
         self.export_annotation_var.set("none")
         self.export_marker_var.set("")
         export_defaults = {
             "corrected_csv": False, "corrected_png": True,
             "dff_csv": True, "dff_png": True, "dff_svg": False,
             "zscore_csv": True, "zscore_png": True, "zscore_svg": False,
+            "event_csv": False, "event_png": False, "event_svg": False,
         }
         for key, value in export_defaults.items():
             self.export_vars[key].set(value)
@@ -729,7 +782,23 @@ class PretreatmentApp:
         self.processed = None
         self.details = None
         self.normalized = False
+        self.event_trials = None
+        self.event_average = None
+        self.event_details = None
+        self.event_view_active = False
         self.display_cache.clear()
+
+    def clear_event_analysis(self, message: str | None = None) -> None:
+        """Discard event results when their corrected source signal or marker set changes."""
+        was_active = self.event_view_active
+        self.event_trials = None
+        self.event_average = None
+        self.event_details = None
+        self.event_view_active = False
+        if was_active and hasattr(self, "figure"):
+            self.rebuild_axes()
+        if message is not None:
+            self.vars["event_status"].set(message)
 
     def current_config(self) -> ProcessingConfig:
         method = self.vars["method"].get()
@@ -845,6 +914,9 @@ class PretreatmentApp:
                         self.processed[smoothed] = self.smooth_array(self.processed[raw].to_numpy(float))
                 if self.normalized and self.details and self.details.get("normalization"):
                     self.details["normalization"]["smooth_seconds"] = self.smoothing_seconds()
+            self.clear_event_analysis(
+                "Display processing changed. Recalculate the event analysis."
+            )
             self.redraw_current()
             downsample_text = (f"{downsample_value:g} {downsample_mode}"
                                if downsample_enabled else "Off")
@@ -892,13 +964,16 @@ class PretreatmentApp:
             self.vars["output_name"].set(f"output_{self.folder.name}_{self.source_channel_var.get()}")
             self.refresh_markers(); self.method_changed()
             self.vars["status"].set(
-                "Data loaded. The current display is not smoothed or downsampled. Enter the baseline and set the fitting regions."
+                "Data loaded. The third plot shows the direct raw-channel combination. "
+                "Choose ratio or subtraction, then enter the baseline and set the fitting regions."
             )
         except Exception as exc:
             messagebox.showerror("Load Failed", str(exc))
 
     def method_changed(self) -> None:
         fit_both = self.vars["method"].get() == "fit_both"
+        if self.event_trials is not None:
+            self.clear_event_analysis("Processing method changed. Recalculate the event analysis.")
         self.fit410_button.configure(state="normal" if fit_both else "disabled")
         self.combine_box.configure(state="readonly" if fit_both else "disabled")
         self.rebuild_axes();
@@ -906,6 +981,62 @@ class PretreatmentApp:
             self.draw_processed()
         elif self.data is not None:
             self.draw_raw_preview()
+
+    def combine_changed(self) -> None:
+        """Refresh the raw preview or corrected combination when its operation changes."""
+        if self.vars["method"].get() != "fit_both":
+            return
+        method = self.vars["combine"].get()
+        if self.processed is None:
+            self.rebuild_axes()
+            if self.data is not None:
+                self.draw_raw_preview()
+                self.vars["status"].set(
+                    f"Showing the direct raw 470 {'/' if method == 'ratio' else '-'} 410 result."
+                )
+            return
+
+        from tkinter import messagebox
+        previous_method = (
+            "ratio" if "/" in str((self.details or {}).get("combined_label", "")) else "subtraction"
+        )
+        corrected470 = self.processed["corrected_470"].to_numpy(float)
+        corrected410 = self.processed["corrected_410"].to_numpy(float)
+        if method == "ratio":
+            if np.any(np.isfinite(corrected410) & np.isclose(corrected410, 0)):
+                self.vars["combine"].set(previous_method)
+                messagebox.showerror(
+                    "Cannot Calculate Ratio",
+                    "The corrected 410 trace contains zero, so the ratio cannot be calculated.",
+                )
+                return
+            combined = corrected470 / corrected410
+            combined_label = "Corrected 470 / 410 ratio"
+            analysis_reference = self.number("baseline470") / self.number("baseline410")
+        elif method == "subtraction":
+            combined = corrected470 - corrected410
+            combined_label = "Corrected 470 - 410"
+            analysis_reference = self.number("baseline470") - self.number("baseline410")
+        else:
+            self.vars["combine"].set(previous_method)
+            return
+
+        self.processed["combined_signal"] = combined
+        self.processed["analysis_trace"] = combined
+        self.processed["combined_signal_smoothed"] = self.smooth_array(combined)
+        self.processed["analysis_trace_smoothed"] = self.smooth_array(combined)
+        self.normalized = False
+        self.clear_event_analysis("Channel combination changed. Recalculate the event analysis.")
+        self.display_cache.clear()
+        if self.details is not None:
+            self.details["combined_label"] = combined_label
+            self.details["analysis_reference_from_user_baselines"] = float(analysis_reference)
+            self.details["normalization"] = None
+        self.rebuild_axes()
+        self.draw_processed()
+        self.vars["status"].set(
+            f"Channel combination changed to {method}. Recalculate dF/F0 and Z-score if needed."
+        )
 
     def channel_changed(self) -> None:
         """Switch channel atomically and force a clean raw-data preview."""
@@ -937,6 +1068,7 @@ class PretreatmentApp:
         self.processed = None
         self.details = None
         self.normalized = False
+        self.clear_event_analysis("Apply correction for this recording channel before event analysis.")
         self.display_cache.clear()
         self.fit_regions = {"410": [], "470": []}
         self.fit_signatures = {"410": None, "470": None}
@@ -987,6 +1119,7 @@ class PretreatmentApp:
             self.vars["status"].set("Fitting..."); self.root.update_idletasks()
             self.processed, self.details = process_data(self.data, config)
             self.normalized = False
+            self.clear_event_analysis("Correction updated. Select a marker name and calculate event analysis.")
             self.display_cache.clear()
             self.rebuild_axes(); self.draw_processed()
             self.vars["status"].set(
@@ -1336,6 +1469,7 @@ class PretreatmentApp:
     def draw_raw_preview(self, source: str | None = None) -> None:
         if self.data is None:
             return
+        self.set_x_axis_unit("min")
         source = source or self.source_channel_var.get()
         try:
             start, end = self.number("range_start"), self.number("range_end")
@@ -1349,16 +1483,28 @@ class PretreatmentApp:
             return
         subset = self.data.loc[use]; full_x = subset["TimeStamp"].to_numpy(float) / 60000
         x = full_x
+        raw470 = subset[f"{source}-470"].to_numpy(float)
+        raw410 = subset[f"{source}-410"].to_numpy(float)
         for ax, key in zip(self.axes, self.axis_keys):
             ax.clear()
             if key == "470":
-                values = subset[f"{source}-470"].to_numpy(float)
-                ax.plot(x, values, color="#2E8B57", lw=self.line_width("raw470"),
+                ax.plot(x, raw470, color="#2E8B57", lw=self.line_width("raw470"),
                         gid="raw470"); ax.set_ylabel(f"Raw {source} 470")
             elif key == "410":
-                values = subset[f"{source}-410"].to_numpy(float)
-                ax.plot(x, values, color="#2F6FB0", lw=self.line_width("raw410"),
+                ax.plot(x, raw410, color="#2F6FB0", lw=self.line_width("raw410"),
                         gid="raw410"); ax.set_ylabel(f"Raw {source} 410")
+            elif key == "ratio":
+                direct = np.full(len(raw470), np.nan, dtype=float)
+                valid = np.isfinite(raw470) & np.isfinite(raw410) & ~np.isclose(raw410, 0)
+                np.divide(raw470, raw410, out=direct, where=valid)
+                ax.plot(x, direct, color="#7B4B94", lw=self.line_width("combined"),
+                        gid="combined")
+                ax.set_ylabel("Raw 470 / 410")
+            elif key == "subtraction":
+                direct = raw470 - raw410
+                ax.plot(x, direct, color="#7B4B94", lw=self.line_width("combined"),
+                        gid="combined")
+                ax.set_ylabel("Raw 470 - 410")
             else:
                 ax.text(0.5, 0.5, "Apply fitting to display combined trace", ha="center", va="center", transform=ax.transAxes)
                 ax.set_ylabel(key)
@@ -1371,6 +1517,7 @@ class PretreatmentApp:
     def draw_processed(self) -> None:
         if self.processed is None:
             return
+        self.set_x_axis_unit("min")
         d = self.processed; indices = self.display_indices(len(d))
         time_column = "relative_time_min" if self.normalized else "time_min"
         x = d[time_column].to_numpy(float)[indices]
@@ -1633,11 +1780,19 @@ class PretreatmentApp:
                 variable.set("")
         if not choices and self.zero_enabled_var.get() and self.zero_mode_var.get() == "marker":
             self.zero_mode_var.set("time")
+        marker_names = sorted({str(marker["name"]) for marker in self.markers})
+        if getattr(self, "event_marker_box", None) is not None:
+            self.event_marker_box.configure(values=marker_names)
+        if marker_names and self.event_marker_var.get() not in marker_names:
+            self.event_marker_var.set(marker_names[0])
+        elif not marker_names:
+            self.event_marker_var.set("")
 
     def add_marker(self) -> None:
         try:
             self.markers.append({"id": str(uuid.uuid4()), "time_min": self.number("marker_time"),
                                  "name": self.vars["marker_name"].get().strip() or "marker", "source": "manual"})
+            self.clear_event_analysis("Marker list changed. Recalculate the event analysis.")
             self.refresh_markers(); self.redraw_current()
         except Exception as exc:
             self.vars["status"].set(f"Failed to add marker: {exc}")
@@ -1647,10 +1802,12 @@ class PretreatmentApp:
         if selected:
             target = self.sorted_markers()[selected[0]]
             self.markers = [marker for marker in self.markers if marker["id"] != target["id"]]
+            self.clear_event_analysis("Marker list changed. Recalculate the event analysis.")
             self.refresh_markers(); self.redraw_current()
 
     def reset_markers(self) -> None:
         self.markers = [dict(marker) for marker in self.original_markers]
+        self.clear_event_analysis("Marker list restored. Recalculate the event analysis.")
         self.refresh_markers(); self.redraw_current()
 
     def selected_line_width_key(self) -> str:
@@ -1698,6 +1855,125 @@ class PretreatmentApp:
         value = self.number("zero_time")
         return value, {"enabled": True, "mode": "time", "original_time_min": value}
 
+    def current_event_settings(self) -> tuple[str, float, float, float]:
+        marker_name = self.event_marker_var.get().strip()
+        if not marker_name:
+            raise ValueError("Select a marker name for event analysis.")
+        pre_seconds = self.number("event_pre_seconds")
+        post_seconds = self.number("event_post_seconds")
+        baseline_seconds = self.number("event_baseline_seconds")
+        if pre_seconds <= 0 or post_seconds <= 0 or baseline_seconds <= 0:
+            raise ValueError("Event trace and baseline durations must be greater than 0 seconds.")
+        if baseline_seconds > pre_seconds:
+            raise ValueError("The event baseline cannot be longer than the pre-marker trace interval.")
+        return marker_name, pre_seconds, post_seconds, baseline_seconds
+
+    def calculate_event_analysis(self) -> None:
+        from tkinter import messagebox
+        if self.processed is None or self.details is None:
+            messagebox.showinfo("Correction Required", "Complete fitting and apply correction first.")
+            return
+        try:
+            marker_name, pre_seconds, post_seconds, baseline_seconds = self.current_event_settings()
+            marker_times = [
+                float(marker["time_min"]) for marker in self.sorted_markers()
+                if str(marker["name"]) == marker_name
+            ]
+            event_source = self.processed.copy()
+            event_source["analysis_trace"] = self.display_values("analysis_trace")
+            trials, average, event_details = calculate_event_locked_traces(
+                event_source,
+                marker_times,
+                marker_name,
+                pre_seconds,
+                post_seconds,
+                baseline_seconds,
+            )
+            event_details["smoothing_seconds"] = self.smoothing_seconds()
+            event_details["source_channel"] = self.source_channel_var.get()
+            event_details["corrected_trace_label"] = (
+                self.details.get("combined_label") or "Corrected 470"
+            )
+            self.event_trials = trials
+            self.event_average = average
+            self.event_details = event_details
+            self.event_view_active = True
+            self.draw_event_analysis()
+            excluded_count = len(event_details["excluded_events"])
+            self.vars["event_status"].set(
+                f"Calculated {event_details['included_trials']} trial(s) for '{marker_name}'"
+                + (f"; excluded {excluded_count} incomplete/invalid event(s)." if excluded_count else ".")
+            )
+            self.vars["status"].set(self.vars["event_status"].get())
+        except Exception as exc:
+            messagebox.showerror("Event Analysis Failed", str(exc))
+            self.vars["event_status"].set(f"Event analysis failed: {exc}")
+
+    def draw_event_analysis(self) -> None:
+        if self.event_trials is None or self.event_average is None or self.event_details is None:
+            return
+        self.set_x_axis_unit("s")
+        for selector in self.zoom_selectors:
+            selector.set_active(False)
+            selector.disconnect_events()
+        self.zoom_selectors = []
+        self.figure.clear()
+        self.axes = self.figure.subplots(4, 1, sharex=True, squeeze=False).ravel().tolist()
+        self.axis_keys = ["event_dff_trials", "event_dff_average", "event_zscore_trials", "event_zscore_average"]
+        trials, average = self.event_trials, self.event_average
+        relative_time = average["relative_time_s"].to_numpy(float)
+        palette = ["#4C78A8", "#F58518", "#54A24B", "#E45756", "#72B7B2",
+                   "#B279A2", "#FF9DA6", "#9D755D", "#BAB0AC", "#7B4B94"]
+        grouped = list(trials.groupby("trial", sort=True))
+        for index, (trial_number, trial) in enumerate(grouped):
+            color = palette[index % len(palette)]
+            trial_time = trial["relative_time_s"].to_numpy(float)
+            self.axes[0].plot(
+                trial_time, trial["dff_percent"].to_numpy(float), color=color,
+                lw=self.line_width("dff"), alpha=0.78, label=f"Trial {trial_number}", gid="dff",
+            )
+            self.axes[2].plot(
+                trial_time, trial["zscore"].to_numpy(float), color=color,
+                lw=self.line_width("zscore"), alpha=0.78, label=f"Trial {trial_number}", gid="zscore",
+            )
+        dff_mean = average["dff_percent_mean"].to_numpy(float)
+        dff_sem = average["dff_percent_sem"].to_numpy(float)
+        zscore_mean = average["zscore_mean"].to_numpy(float)
+        zscore_sem = average["zscore_sem"].to_numpy(float)
+        self.axes[1].plot(relative_time, dff_mean, color="#5B2C83", lw=2.0, label="Mean", gid="dff")
+        self.axes[3].plot(relative_time, zscore_mean, color="#5B2C83", lw=2.0, label="Mean", gid="zscore")
+        if np.any(np.isfinite(dff_sem)):
+            self.axes[1].fill_between(relative_time, dff_mean - dff_sem, dff_mean + dff_sem,
+                                      color="#9B7CB6", alpha=0.28, label="SEM")
+        if np.any(np.isfinite(zscore_sem)):
+            self.axes[3].fill_between(relative_time, zscore_mean - zscore_sem, zscore_mean + zscore_sem,
+                                      color="#9B7CB6", alpha=0.28, label="SEM")
+        labels = ["Trial dF/F0 (%)", "Average dF/F0 (%)", "Trial Z-score", "Average Z-score"]
+        baseline_start = -float(self.event_details["baseline_seconds"])
+        for ax, label in zip(self.axes, labels):
+            ax.axvspan(baseline_start, 0, color="#B8B8B8", alpha=0.18)
+            ax.axvline(0, color="#C43C39", ls="--", lw=1.0)
+            ax.axhline(0, color="#777777", lw=0.7, alpha=0.6)
+            ax.set_ylabel(label)
+            self.style_axis(ax)
+        self.axes[0].legend(frameon=False, ncol=min(5, len(grouped)), fontsize=7, loc="upper right")
+        self.axes[1].legend(frameon=False, fontsize=8, loc="upper right")
+        self.axes[3].legend(frameon=False, fontsize=8, loc="upper right")
+        self.axes[-1].set_xlabel("Time from marker (s)")
+        self.axes[-1].set_xlim(-float(self.event_details["pre_seconds"]),
+                               float(self.event_details["post_seconds"]))
+        self.figure.suptitle(
+            f"Event analysis | {self.event_details['marker_name']} | "
+            f"n={self.event_details['included_trials']} | shaded area=baseline",
+            fontsize=11,
+        )
+        self.refresh_axis_scale_controls()
+        self.capture_initial_view()
+        self.initialize_hover_artists()
+        self.initialize_box_zoom()
+        self.update_scale_readouts()
+        self.canvas.draw_idle()
+
     def calculate_normalization(self) -> None:
         from tkinter import messagebox
         if self.processed is None or self.details is None:
@@ -1719,6 +1995,7 @@ class PretreatmentApp:
             self.processed = normalized
             self.details["normalization"] = normalization_details
             self.normalized = True
+            self.event_view_active = False
             self.display_cache.clear()
             self.rebuild_axes(); self.draw_processed()
             self.vars["status"].set(
@@ -1734,7 +2011,9 @@ class PretreatmentApp:
         if self.axes and self.axes[-1].has_data():
             limits = self.axes[-1].get_xlim()
             y_limits = {key: ax.get_ylim() for ax, key in zip(self.axes, self.axis_keys)}
-        if self.processed is not None:
+        if self.event_view_active and self.event_trials is not None:
+            self.draw_event_analysis()
+        elif self.processed is not None:
             self.draw_processed()
         elif self.data is not None:
             self.draw_raw_preview()
@@ -1783,6 +2062,67 @@ class PretreatmentApp:
             save_args["dpi"] = 220
         # Keep labels as text in SVG instead of converting glyphs to outlines,
         # so Illustrator can edit both the annotation and the vector curves.
+        if path.suffix.lower() == ".svg":
+            from matplotlib import rc_context
+            with rc_context({"svg.fonttype": "none"}):
+                figure.savefig(path, **save_args)
+        else:
+            figure.savefig(path, **save_args)
+
+    def save_event_analysis_figure(self, path: Path) -> None:
+        """Export individual event trials and their mean ± SEM as four aligned panels."""
+        from matplotlib.figure import Figure
+        if self.event_trials is None or self.event_average is None or self.event_details is None:
+            raise ValueError("Calculate event analysis before exporting event plots.")
+        figure = Figure(figsize=(12, 10), dpi=100, constrained_layout=True)
+        axes = figure.subplots(4, 1, sharex=True, squeeze=False).ravel().tolist()
+        trials, average = self.event_trials, self.event_average
+        palette = ["#4C78A8", "#F58518", "#54A24B", "#E45756", "#72B7B2",
+                   "#B279A2", "#FF9DA6", "#9D755D", "#BAB0AC", "#7B4B94"]
+        grouped = list(trials.groupby("trial", sort=True))
+        for index, (trial_number, trial) in enumerate(grouped):
+            color = palette[index % len(palette)]
+            time_s = trial["relative_time_s"].to_numpy(float)
+            axes[0].plot(time_s, trial["dff_percent"].to_numpy(float), color=color,
+                         lw=self.line_width("dff"), alpha=0.78, label=f"Trial {trial_number}")
+            axes[2].plot(time_s, trial["zscore"].to_numpy(float), color=color,
+                         lw=self.line_width("zscore"), alpha=0.78, label=f"Trial {trial_number}")
+        relative_time = average["relative_time_s"].to_numpy(float)
+        dff_mean = average["dff_percent_mean"].to_numpy(float)
+        dff_sem = average["dff_percent_sem"].to_numpy(float)
+        zscore_mean = average["zscore_mean"].to_numpy(float)
+        zscore_sem = average["zscore_sem"].to_numpy(float)
+        axes[1].plot(relative_time, dff_mean, color="#5B2C83", lw=2.0, label="Mean")
+        axes[3].plot(relative_time, zscore_mean, color="#5B2C83", lw=2.0, label="Mean")
+        if np.any(np.isfinite(dff_sem)):
+            axes[1].fill_between(relative_time, dff_mean - dff_sem, dff_mean + dff_sem,
+                                 color="#9B7CB6", alpha=0.28, label="SEM")
+        if np.any(np.isfinite(zscore_sem)):
+            axes[3].fill_between(relative_time, zscore_mean - zscore_sem, zscore_mean + zscore_sem,
+                                 color="#9B7CB6", alpha=0.28, label="SEM")
+        labels = ["Trial dF/F0 (%)", "Average dF/F0 (%)", "Trial Z-score", "Average Z-score"]
+        baseline_start = -float(self.event_details["baseline_seconds"])
+        for ax, label in zip(axes, labels):
+            ax.axvspan(baseline_start, 0, color="#B8B8B8", alpha=0.18)
+            ax.axvline(0, color="#C43C39", ls="--", lw=1.0)
+            ax.axhline(0, color="#777777", lw=0.7, alpha=0.6)
+            ax.set_ylabel(label)
+            ax.grid(False)
+            ax.spines[["top", "right"]].set_visible(False)
+        axes[0].legend(frameon=False, ncol=min(5, len(grouped)), fontsize=7, loc="upper right")
+        axes[1].legend(frameon=False, fontsize=8, loc="upper right")
+        axes[3].legend(frameon=False, fontsize=8, loc="upper right")
+        axes[-1].set_xlabel("Time from marker (s)")
+        axes[-1].set_xlim(-float(self.event_details["pre_seconds"]),
+                          float(self.event_details["post_seconds"]))
+        figure.suptitle(
+            f"Event analysis | {self.event_details['marker_name']} | "
+            f"n={self.event_details['included_trials']} | mean ± SEM",
+            fontsize=12,
+        )
+        save_args: dict[str, Any] = {"facecolor": "white", "format": path.suffix.lstrip(".")}
+        if path.suffix.lower() == ".png":
+            save_args["dpi"] = 220
         if path.suffix.lower() == ".svg":
             from matplotlib import rc_context
             with rc_context({"svg.fonttype": "none"}):
@@ -1866,6 +2206,29 @@ class PretreatmentApp:
         normalization_requested = any(selections[key] for key in (
             "dff_csv", "dff_png", "dff_svg", "zscore_csv", "zscore_png", "zscore_svg"
         ))
+        event_requested = any(selections[key] for key in ("event_csv", "event_png", "event_svg"))
+        if event_requested and (self.event_trials is None or self.event_average is None or self.event_details is None):
+            messagebox.showinfo(
+                "Event Analysis Required",
+                "Select the marker and event intervals, then calculate the event analysis first.",
+            )
+            return
+        if event_requested and self.event_details is not None:
+            try:
+                current_event = (*self.current_event_settings(), self.smoothing_seconds())
+            except Exception as exc:
+                messagebox.showerror("Invalid Event Settings", str(exc)); return
+            saved_event = (
+                self.event_details["marker_name"], self.event_details["pre_seconds"],
+                self.event_details["post_seconds"], self.event_details["baseline_seconds"],
+                self.event_details.get("smoothing_seconds", 0.0),
+            )
+            if current_event != saved_event:
+                messagebox.showinfo(
+                    "Event Settings Changed",
+                    "The marker, event intervals, baseline, or smoothing has changed. Recalculate event analysis.",
+                )
+                return
         if normalization_requested and not self.normalized:
             messagebox.showinfo("Normalization Required", "Set the baseline interval and calculate dF/F0 and Z-score first.")
             return
@@ -1894,11 +2257,20 @@ class PretreatmentApp:
                                   ("dff_410_percent", "dff_410_percent_smoothed"),
                                   ("zscore_470", "zscore_470_smoothed"),
                                   ("zscore_410", "zscore_410_smoothed")):
-                self.processed[smoothed] = self.smooth_array(self.processed[raw].to_numpy(float))
+                if raw in self.processed:
+                    self.processed[smoothed] = self.smooth_array(self.processed[raw].to_numpy(float))
             export_frame, _export_indices = self.prepared_export_frame()
             output = self.next_output_directory()
             output.mkdir(parents=True, exist_ok=True)
             pd.DataFrame(self.sorted_markers()).to_csv(output / "markers_working_copy.csv", index=False)
+            if selections["event_csv"]:
+                assert self.event_trials is not None and self.event_average is not None
+                self.event_trials.to_csv(
+                    output / "event_aligned_trials.csv", index=False, float_format="%.9g"
+                )
+                self.event_average.to_csv(
+                    output / "event_aligned_average.csv", index=False, float_format="%.9g"
+                )
             time_columns = ["original_time_s", "original_time_min", "relative_time_s", "relative_time_min"]
             if selections["corrected_csv"]:
                 corrected_columns = time_columns + ["corrected_470"]
@@ -1958,40 +2330,34 @@ class PretreatmentApp:
                                              self.display_values("analysis_trace"), "#7B4B94", "combined"))
                 self.save_trace_png(output / "corrected_fluorescence_trace.png", corrected_panels,
                                     "Corrected fluorescence traces", annotation_limits)
-            dff_panels = [("Ratio dF/F0 (%)", self.display_values("dff_percent"), "#7B4B94", "dff")]
-            if self.vars["method"].get() == "fit_both":
-                dff_panels = [
-                    ("470 dF/F0 (%)", self.display_values("dff_470_percent"), "#006D3C", "dff"),
-                    ("410 dF/F0 (%)", self.display_values("dff_410_percent"), "#15558D", "dff"),
-                    *dff_panels,
-                ]
-            if selections["dff_png"]:
-                self.save_trace_png(
-                    output / "dFF0_trace.png",
-                    dff_panels, "dF/F0", annotation_limits,
-                )
-            if selections["dff_svg"]:
-                self.save_trace_png(
-                    output / "dFF0_trace.svg",
-                    dff_panels, "dF/F0", annotation_limits,
-                )
-            z_panels = [("Ratio Z-score", self.display_values("zscore"), "#7B4B94", "zscore")]
-            if self.vars["method"].get() == "fit_both":
-                z_panels = [
-                    ("470 Z-score", self.display_values("zscore_470"), "#006D3C", "zscore"),
-                    ("410 Z-score", self.display_values("zscore_410"), "#15558D", "zscore"),
-                    *z_panels,
-                ]
-            if selections["zscore_png"]:
-                self.save_trace_png(
-                    output / "zscore_trace.png",
-                    z_panels, "Z-score", annotation_limits,
-                )
-            if selections["zscore_svg"]:
-                self.save_trace_png(
-                    output / "zscore_trace.svg",
-                    z_panels, "Z-score", annotation_limits,
-                )
+            if selections["dff_png"] or selections["dff_svg"]:
+                dff_panels = [("Ratio dF/F0 (%)", self.display_values("dff_percent"), "#7B4B94", "dff")]
+                if self.vars["method"].get() == "fit_both":
+                    dff_panels = [
+                        ("470 dF/F0 (%)", self.display_values("dff_470_percent"), "#006D3C", "dff"),
+                        ("410 dF/F0 (%)", self.display_values("dff_410_percent"), "#15558D", "dff"),
+                        *dff_panels,
+                    ]
+                if selections["dff_png"]:
+                    self.save_trace_png(output / "dFF0_trace.png", dff_panels, "dF/F0", annotation_limits)
+                if selections["dff_svg"]:
+                    self.save_trace_png(output / "dFF0_trace.svg", dff_panels, "dF/F0", annotation_limits)
+            if selections["zscore_png"] or selections["zscore_svg"]:
+                z_panels = [("Ratio Z-score", self.display_values("zscore"), "#7B4B94", "zscore")]
+                if self.vars["method"].get() == "fit_both":
+                    z_panels = [
+                        ("470 Z-score", self.display_values("zscore_470"), "#006D3C", "zscore"),
+                        ("410 Z-score", self.display_values("zscore_410"), "#15558D", "zscore"),
+                        *z_panels,
+                    ]
+                if selections["zscore_png"]:
+                    self.save_trace_png(output / "zscore_trace.png", z_panels, "Z-score", annotation_limits)
+                if selections["zscore_svg"]:
+                    self.save_trace_png(output / "zscore_trace.svg", z_panels, "Z-score", annotation_limits)
+            if selections["event_png"]:
+                self.save_event_analysis_figure(output / "event_aligned_dFF_zscore.png")
+            if selections["event_svg"]:
+                self.save_event_analysis_figure(output / "event_aligned_dFF_zscore.svg")
 
             marker_values = np.zeros(len(export_frame), dtype=int)
             time_values = export_frame["relative_time_s"].to_numpy(float)
@@ -2017,6 +2383,7 @@ class PretreatmentApp:
             log = {
                 "source_folder": str(self.folder), "source_files_modified": False,
                 "processing": asdict(self.current_config()), "fit_details": self.details,
+                "event_analysis": self.event_details,
                 "selected_outputs": selections,
                 "export_annotation": {"mode": annotation_label, "limits_in_display_min": annotation_limits},
                 "display_processing": {
@@ -2029,7 +2396,10 @@ class PretreatmentApp:
                     "exported_rows": int(len(export_frame)),
                     "source_rows_before_downsample": int(len(self.processed)),
                     "line_widths": {key: self.line_width(key) for key in LINE_WIDTH_LABELS},
-                    "note": "Applied smoothing and downsampling affect screen, PNG, CSV, and AAPlot outputs.",
+                    "note": (
+                        "Applied smoothing and downsampling affect whole-recording screen, PNG, CSV, and AAPlot outputs. "
+                        "Event analysis uses the applied smoothing but retains its full marker-aligned sampling grid."
+                    ),
                 },
                 "marker_edits": {
                     "deleted_original_markers": [m for m in self.original_markers if m["id"] not in current_ids],
