@@ -1,4 +1,4 @@
-"""Read-only data loading and independent-channel photometry fitting."""
+"""Read-only data loading and wavelength-independent photometry fitting."""
 from __future__ import annotations
 
 import uuid
@@ -16,21 +16,35 @@ from scipy.optimize import least_squares
 class ProcessingConfig:
     range_start_min: float
     range_end_min: float
-    offset_410: float
-    offset_470: float
-    baseline_410: float
-    baseline_470: float
-    method: str = "fit_both"  # fit_both | fit_470_only
+    offsets: dict[str, float] = field(default_factory=dict)
+    baselines: dict[str, float] = field(default_factory=dict)
+    wavelengths: list[str] = field(default_factory=list)
+    analysis_wavelength: str = "470"
+    reference_wavelength: str | None = "410"
     combine: str = "ratio"  # ratio | subtraction
     fit_model: str = "double_exponential"
     smooth_seconds: float = 10.0
-    fit_regions_410: list[tuple[float, float]] = field(default_factory=list)
-    fit_regions_470: list[tuple[float, float]] = field(default_factory=list)
-    fit_model_410: str | None = None
-    fit_model_470: str | None = None
-    fit_baseline_mode_410: str | None = "fit_constant"
-    fit_baseline_mode_470: str | None = "fit_constant"
+    fit_regions: dict[str, list[tuple[float, float]]] = field(default_factory=dict)
+    fit_models: dict[str, str | None] = field(default_factory=dict)
+    fit_baseline_modes: dict[str, str | None] = field(default_factory=dict)
     source_channel: str = "CH1"
+
+
+SUPPORTED_WAVELENGTHS = ("410", "470", "560")
+
+
+def available_recording_channels(data: pd.DataFrame) -> dict[str, list[str]]:
+    """Return acquisition channels and their available supported wavelengths."""
+    found: dict[str, list[str]] = {}
+    for column in data.columns:
+        match = re.fullmatch(r"(CH\d+)-(410|470|560)", str(column))
+        if match:
+            found.setdefault(match.group(1), []).append(match.group(2))
+    order = {wavelength: index for index, wavelength in enumerate(SUPPORTED_WAVELENGTHS)}
+    return {
+        channel: sorted(set(wavelengths), key=lambda value: order[value])
+        for channel, wavelengths in sorted(found.items(), key=lambda item: int(item[0][2:]))
+    }
 
 
 def load_recording(folder: Path) -> tuple[pd.DataFrame, list[dict[str, Any]], str]:
@@ -39,26 +53,22 @@ def load_recording(folder: Path) -> tuple[pd.DataFrame, list[dict[str, Any]], st
         raise FileNotFoundError(f"File not found: {path}")
     with path.open("r", encoding="utf-8-sig", errors="replace") as handle:
         metadata = handle.readline().strip()
-    data = pd.read_csv(path, skiprows=1)
+    data = pd.read_csv(path, skiprows=1, low_memory=False)
     data = data.loc[:, ~data.columns.astype(str).str.startswith("Unnamed")]
-    # CH1 is mandatory for backwards compatibility.  Any additional CH<n>
-    # pair is accepted, so the GUI can grow from two to more acquisition
-    # channels without changing the file reader again.
-    required = ["TimeStamp", "CH1-410", "CH1-470"]
-    missing = [column for column in required if column not in data]
-    if missing:
-        raise ValueError(f"Fluorescence.csv is missing required columns: {', '.join(missing)}")
-    for column in required:
+    if "TimeStamp" not in data:
+        raise ValueError("Fluorescence.csv is missing the required TimeStamp column.")
+    channels = available_recording_channels(data)
+    if not channels:
+        raise ValueError(
+            "Fluorescence.csv does not contain any supported fluorescence columns "
+            "(expected CH<n>-410, CH<n>-470, or CH<n>-560)."
+        )
+    numeric_columns = ["TimeStamp", *(f"{channel}-{wavelength}"
+                                      for channel, wavelengths in channels.items()
+                                      for wavelength in wavelengths)]
+    for column in numeric_columns:
         data[column] = pd.to_numeric(data[column], errors="coerce")
-    prefixes = sorted({str(column)[:-4] for column in data.columns
-                       if re.fullmatch(r"CH\d+-410", str(column))})
-    for prefix in prefixes:
-        paired = [f"{prefix}-410", f"{prefix}-470"]
-        if any(column not in data for column in paired):
-            raise ValueError(f"{prefix} data must include both {paired[0]} and {paired[1]} columns.")
-        for column in paired:
-            data[column] = pd.to_numeric(data[column], errors="coerce")
-    data = data.dropna(subset=required).sort_values("TimeStamp").reset_index(drop=True)
+    data = data.dropna(subset=["TimeStamp"]).sort_values("TimeStamp").reset_index(drop=True)
     if len(data) < 20:
         raise ValueError("Fewer than 20 valid data points are available.")
 
@@ -325,86 +335,97 @@ def process_data(data: pd.DataFrame, config: ProcessingConfig) -> tuple[pd.DataF
     dt = np.diff(time_s)
     sample_rate = float(1 / np.median(dt[dt > 0]))
     source = config.source_channel
-    columns = [f"{source}-410", f"{source}-470"]
-    if any(column not in subset for column in columns):
-        raise ValueError(f"{source} requires columns {columns[0]} and {columns[1]}.")
-    raw410 = subset[columns[0]].to_numpy(float)
-    raw470 = subset[columns[1]].to_numpy(float)
-    adjusted410 = raw410 - config.offset_410
-    adjusted470 = raw470 - config.offset_470
+    available = available_recording_channels(subset).get(source, [])
+    wavelengths = [str(value) for value in config.wavelengths if str(value) in available]
+    if not wavelengths:
+        raise ValueError(f"{source} has no selected 410, 470, or 560 fluorescence channel.")
+    if config.analysis_wavelength not in wavelengths:
+        raise ValueError(f"Analysis wavelength {config.analysis_wavelength} is unavailable in {source}.")
+    if config.reference_wavelength is not None and config.reference_wavelength not in wavelengths:
+        raise ValueError(f"Reference wavelength {config.reference_wavelength} is unavailable in {source}.")
+    if config.reference_wavelength == config.analysis_wavelength:
+        raise ValueError("The analysis and reference wavelengths must be different.")
 
-    mask470 = region_mask(time_min, config.fit_regions_470)
-    model470 = config.fit_model_470 or config.fit_model
-    baseline_mode470 = config.fit_baseline_mode_470 or "fit_constant"
-    fit470, parameters470 = fit_bleaching(
-        time_s, adjusted470, config.baseline_470, model470, mask470, baseline_mode470
-    )
-    parameters470["fit_regions"] = [list(region) for region in config.fit_regions_470]
-    if np.any(np.isclose(fit470, 0)):
-        raise ValueError("The fitted 470 curve contains zero. Adjust the baseline, offset, or fitting regions.")
-    corrected470 = adjusted470 / fit470 * config.baseline_470
+    output_columns: dict[str, np.ndarray] = {}
+    fit_parameters: dict[str, dict[str, Any]] = {}
+    corrected: dict[str, np.ndarray] = {}
+    masks: dict[str, np.ndarray] = {}
+    for wavelength in wavelengths:
+        column = f"{source}-{wavelength}"
+        raw = subset[column].to_numpy(float)
+        if np.isfinite(raw).sum() < 20:
+            raise ValueError(f"{column} contains fewer than 20 valid samples in the selected range.")
+        offset = float(config.offsets[wavelength])
+        baseline = float(config.baselines[wavelength])
+        adjusted = raw - offset
+        mask = region_mask(time_min, config.fit_regions.get(wavelength, []))
+        model = config.fit_models.get(wavelength) or config.fit_model
+        baseline_mode = config.fit_baseline_modes.get(wavelength) or "fit_constant"
+        fitted, parameters = fit_bleaching(time_s, adjusted, baseline, model, mask, baseline_mode)
+        parameters["fit_regions"] = [list(region) for region in config.fit_regions.get(wavelength, [])]
+        if np.any(np.isfinite(fitted) & np.isclose(fitted, 0)):
+            raise ValueError(
+                f"The fitted {wavelength} curve contains zero. Adjust its baseline, offset, or fitting regions."
+            )
+        channel_corrected = adjusted / fitted * baseline
+        output_columns[f"raw_{wavelength}"] = raw
+        output_columns[f"offset_adjusted_{wavelength}"] = adjusted
+        output_columns[f"fit_{wavelength}"] = fitted
+        output_columns[f"corrected_{wavelength}"] = channel_corrected
+        output_columns[f"fit_used_{wavelength}"] = mask.astype(int)
+        corrected[wavelength] = channel_corrected
+        masks[wavelength] = mask
+        fit_parameters[wavelength] = parameters
 
-    fit410 = np.full(len(subset), np.nan)
-    corrected410 = np.full(len(subset), np.nan)
-    parameters410: dict[str, Any] | None = None
+    primary = config.analysis_wavelength
+    reference = config.reference_wavelength
     combined = np.full(len(subset), np.nan)
     combined_label: str | None = None
-    mask410 = np.zeros(len(subset), dtype=bool)
-    if config.method == "fit_both":
-        mask410 = region_mask(time_min, config.fit_regions_410)
-        model410 = config.fit_model_410 or config.fit_model
-        baseline_mode410 = config.fit_baseline_mode_410 or "fit_constant"
-        fit410, parameters410 = fit_bleaching(
-            time_s, adjusted410, config.baseline_410, model410, mask410, baseline_mode410
-        )
-        parameters410["fit_regions"] = [list(region) for region in config.fit_regions_410]
-        if np.any(np.isclose(fit410, 0)):
-            raise ValueError("The fitted 410 curve contains zero. Adjust the baseline, offset, or fitting regions.")
-        corrected410 = adjusted410 / fit410 * config.baseline_410
+    if reference is not None:
         if config.combine == "ratio":
-            if np.any(np.isclose(corrected410, 0)):
-                raise ValueError("The corrected 410 trace contains zero, so the ratio cannot be calculated.")
-            combined = corrected470 / corrected410
-            combined_label = "Corrected 470 / 410 ratio"
-            analysis_reference = config.baseline_470 / config.baseline_410
+            if np.any(np.isfinite(corrected[reference]) & np.isclose(corrected[reference], 0)):
+                raise ValueError(
+                    f"The corrected {reference} trace contains zero, so the ratio cannot be calculated."
+                )
+            combined = corrected[primary] / corrected[reference]
+            combined_label = f"Corrected {primary} / {reference} ratio"
+            analysis_reference = config.baselines[primary] / config.baselines[reference]
         elif config.combine == "subtraction":
-            combined = corrected470 - corrected410
-            combined_label = "Corrected 470 - 410"
-            analysis_reference = config.baseline_470 - config.baseline_410
+            combined = corrected[primary] - corrected[reference]
+            combined_label = f"Corrected {primary} - {reference}"
+            analysis_reference = config.baselines[primary] - config.baselines[reference]
         else:
             raise ValueError(f"Unknown combination method: {config.combine}")
-
         analysis_trace = combined.copy()
     else:
-        analysis_trace = corrected470.copy()
-        analysis_reference = config.baseline_470
+        analysis_trace = corrected[primary].copy()
+        analysis_reference = config.baselines[primary]
 
     smooth_points = max(1, int(round(config.smooth_seconds * sample_rate)))
     combined_smoothed = (pd.Series(combined).rolling(smooth_points, center=True, min_periods=1).mean().to_numpy()
-                         if config.method == "fit_both" else combined.copy())
+                         if reference is not None else combined.copy())
     analysis_smoothed = pd.Series(analysis_trace).rolling(smooth_points, center=True, min_periods=1).mean().to_numpy()
     empty = np.full(len(subset), np.nan)
     output = pd.DataFrame({
         "time_s": time_s, "time_min": time_min,
         "original_time_s": time_s, "original_time_min": time_min,
         "relative_time_s": time_s, "relative_time_min": time_min,
-        "raw_410": raw410, "raw_470": raw470,
-        "offset_adjusted_410": adjusted410, "offset_adjusted_470": adjusted470,
-        "fit_410": fit410, "fit_470": fit470,
-        "corrected_410": corrected410, "corrected_470": corrected470,
+        **output_columns,
         "combined_signal": combined, "combined_signal_smoothed": combined_smoothed,
         "analysis_trace": analysis_trace, "analysis_trace_smoothed": analysis_smoothed,
         "dff_percent": empty.copy(), "dff_percent_smoothed": empty.copy(),
         "zscore": empty.copy(), "zscore_smoothed": empty.copy(),
         "normalization_baseline": np.zeros(len(subset), dtype=int),
-        "fit_used_410": mask410.astype(int), "fit_used_470": mask470.astype(int),
     })
     details = {
         "sample_rate_hz": sample_rate,
         "rows": int(len(output)),
         "combined_label": combined_label,
-        "fit_410_parameters": parameters410,
-        "fit_470_parameters": parameters470,
+        "wavelengths": wavelengths,
+        "analysis_wavelength": primary,
+        "reference_wavelength": reference,
+        "fit_parameters": fit_parameters,
+        **{f"fit_{wavelength}_parameters": fit_parameters[wavelength] for wavelength in wavelengths},
         "analysis_reference_from_user_baselines": float(analysis_reference),
         "normalization": None,
         "source_channel": source,
@@ -454,10 +475,14 @@ def calculate_normalized_traces(
     result["zscore_smoothed"] = pd.Series(zscore).rolling(
         smooth_points, center=True, min_periods=1
     ).mean().to_numpy()
-    # In two-wavelength mode, retain the individual corrected traces as
-    # first-class analysis outputs rather than normalizing only their ratio.
-    # The legacy dff_percent/zscore names continue to mean the analysis trace.
-    for label, column in (("470", "corrected_470"), ("410", "corrected_410")):
+    # Retain every independently corrected wavelength as a first-class output.
+    # The legacy dff_percent/zscore names continue to mean the selected analysis trace.
+    corrected_columns = sorted(
+        (str(column).removeprefix("corrected_"), str(column))
+        for column in result.columns if re.fullmatch(r"corrected_(410|470|560)", str(column))
+    )
+    channel_normalization: dict[str, dict[str, float]] = {}
+    for label, column in corrected_columns:
         values = result[column].to_numpy(float)
         valid_baseline = baseline_mask & np.isfinite(values)
         if valid_baseline.sum() < 20:
@@ -483,6 +508,11 @@ def calculate_normalized_traces(
         result[f"zscore_{label}_smoothed"] = pd.Series(channel_z).rolling(
             smooth_points, center=True, min_periods=1
         ).mean().to_numpy()
+        channel_normalization[label] = {
+            "f0_mean": channel_f0,
+            "dff_baseline_mean": float(np.mean(baseline_channel_dff)),
+            "dff_baseline_sd": channel_sd,
+        }
     result["normalization_baseline"] = baseline_mask.astype(int)
     if zero_time_min is None:
         result["relative_time_min"] = time_min
@@ -499,6 +529,7 @@ def calculate_normalized_traces(
         "dff_baseline_sd": z_scale,
         "smooth_seconds": float(smooth_seconds),
         "zero_time_min": None if zero_time_min is None else float(zero_time_min),
+        "channels": channel_normalization,
     }
     return result, details
 

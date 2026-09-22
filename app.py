@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Interactive GUI for independent 410/470 fiber-photometry pretreatment."""
+"""Interactive GUI for independent 410/470/560 fiber-photometry pretreatment."""
 from __future__ import annotations
 
 import json
@@ -16,6 +16,7 @@ import pandas as pd
 
 from processing import (
     ProcessingConfig,
+    available_recording_channels,
     calculate_event_locked_traces,
     calculate_normalized_traces,
     fit_bleaching,
@@ -27,10 +28,12 @@ from processing import (
 
 
 DEFAULT_STRINGS = {
-    "folder": "", "range_start": "0", "range_end": "0", "offset410": "0", "offset470": "0",
-    "baseline410": "", "baseline470": "", "method": "fit_both", "combine": "ratio",
-    "fit_model": "double_exponential", "smooth": "10", "fit410_status": "Not set",
-    "fit470_status": "Not set", "norm_start": "0", "norm_end": "1",
+    "folder": "", "range_start": "0", "range_end": "0",
+    "offset410": "0", "offset470": "0", "offset560": "0",
+    "baseline410": "", "baseline470": "", "baseline560": "",
+    "combine": "ratio", "fit_model": "double_exponential", "smooth": "10",
+    "fit410_status": "Not set", "fit470_status": "Not set", "fit560_status": "Not set",
+    "norm_start": "0", "norm_end": "1",
     "norm_pre_duration": "5", "zero_time": "0", "downsample_value": "1",
     "export_window_duration": "5",
     "event_pre_seconds": "10", "event_post_seconds": "40", "event_baseline_seconds": "2",
@@ -46,9 +49,19 @@ LINE_WIDTH_LABELS = {
     "raw410": "Raw 410",
     "fit410": "410 fit",
     "corrected410": "Corrected 410",
+    "raw560": "Raw 560",
+    "fit560": "560 fit",
+    "corrected560": "Corrected 560",
     "combined": "Ratio / subtraction",
     "dff": "dF/F0",
     "zscore": "Z-score",
+}
+
+WAVELENGTHS = ("410", "470", "560")
+WAVELENGTH_COLORS = {
+    "410": ("#4D8FCC", "#15558D"),
+    "470": ("#4BAF72", "#006D3C"),
+    "560": ("#E6A33A", "#B86F00"),
 }
 
 
@@ -80,14 +93,14 @@ class FitWindow:
         self.time_s = subset["TimeStamp"].to_numpy(float) / 1000
         self.time_min = self.time_s / 60
         raw = subset[f"{config.source_channel}-{channel}"].to_numpy(float)
-        offset = config.offset_470 if channel == "470" else config.offset_410
-        self.baseline = config.baseline_470 if channel == "470" else config.baseline_410
+        offset = config.offsets[channel]
+        self.baseline = config.baselines[channel]
         self.values = raw - offset
         self.regions = [tuple(sorted(region)) for region in existing_regions]
         start, end = float(self.time_min[0]), float(self.time_min[-1])
         if not self.regions:
             self.regions = [(start + 0.15 * (end - start), start + 0.35 * (end - start))]
-        initial_model = config.fit_model_470 if channel == "470" else config.fit_model_410
+        initial_model = config.fit_models.get(channel)
         self.model_var = tk.StringVar(value=initial_model or config.fit_model)
         self.baseline_mode_var = tk.StringVar(value="fit_constant")
         self.signal_width_var = tk.DoubleVar(value=1.0)
@@ -149,7 +162,7 @@ class FitWindow:
         self.refresh_list(); self.draw()
 
     def signature(self) -> tuple[Any, ...]:
-        offset = self.config.offset_470 if self.channel == "470" else self.config.offset_410
+        offset = self.config.offsets[self.channel]
         return (self.config.range_start_min, self.config.range_end_min, offset, self.baseline,
                 self.selected_model, self.selected_baseline_mode)
 
@@ -200,7 +213,7 @@ class FitWindow:
         if fitted is not None:
             self.fitted_preview = np.asarray(fitted, dtype=float)
         self.ax.clear()
-        color = "#2E8B57" if self.channel == "470" else "#2F6FB0"
+        color = WAVELENGTH_COLORS.get(self.channel, ("#666666", "#333333"))[0]
         self.ax.plot(self.time_min, self.values, color=color, lw=float(self.signal_width_var.get()),
                      label=f"{self.channel} after offset", gid="signal")
         if self.fitted_preview is not None:
@@ -398,10 +411,12 @@ class PretreatmentApp:
         self.markers: list[dict[str, Any]] = []
         self.processed: pd.DataFrame | None = None
         self.details: dict[str, Any] | None = None
-        self.fit_regions = {"410": [], "470": []}
-        self.fit_signatures: dict[str, tuple[Any, ...] | None] = {"410": None, "470": None}
-        self.fit_models: dict[str, str | None] = {"410": None, "470": None}
-        self.fit_baseline_modes: dict[str, str | None] = {"410": "fit_constant", "470": "fit_constant"}
+        self.fit_regions = {wavelength: [] for wavelength in WAVELENGTHS}
+        self.fit_signatures: dict[str, tuple[Any, ...] | None] = {wavelength: None for wavelength in WAVELENGTHS}
+        self.fit_models: dict[str, str | None] = {wavelength: None for wavelength in WAVELENGTHS}
+        self.fit_baseline_modes: dict[str, str | None] = {wavelength: "fit_constant" for wavelength in WAVELENGTHS}
+        self.recording_channels: dict[str, list[str]] = {}
+        self.available_wavelengths: list[str] = []
         self.active_source_channel = "CH1"
         self.channel_ranges: dict[str, tuple[float, float]] = {}
         self.axes: list[Any] = []
@@ -448,6 +463,8 @@ class PretreatmentApp:
         self.zero_mode_var = tk.StringVar(value="marker")
         self.zero_marker_var = tk.StringVar(value="")
         self.source_channel_var = tk.StringVar(value="CH1")
+        self.analysis_wavelength_var = tk.StringVar(value="470")
+        self.reference_wavelength_var = tk.StringVar(value="410")
         self.event_marker_var = tk.StringVar(value="")
         self.export_annotation_var = tk.StringVar(value="none")
         self.export_marker_var = tk.StringVar(value="")
@@ -525,21 +542,38 @@ class PretreatmentApp:
         row = self.section(data_tab, row, "Valid Data Range (min)")
         row = self.entry(data_tab, row, "Start", "range_start"); row = self.entry(data_tab, row, "End", "range_end")
         row = self.section(data_tab, row, "Offsets & Fitting Baselines")
-        for label, key in [("410 Offset", "offset410"), ("470 Offset", "offset470"),
-                           ("410 Fitting Baseline", "baseline410"), ("470 Fitting Baseline", "baseline470")]:
-            row = self.entry(data_tab, row, label, key)
-        row = self.section(data_tab, row, "Bleaching Correction")
-        ttk.Radiobutton(data_tab, text="Fit 410 and 470 separately", variable=self.vars["method"], value="fit_both", command=self.method_changed).grid(row=row, column=0, columnspan=2, sticky="w"); row += 1
-        ttk.Radiobutton(data_tab, text="Fit 470 only", variable=self.vars["method"], value="fit_470_only", command=self.method_changed).grid(row=row, column=0, columnspan=2, sticky="w"); row += 1
+        self.wavelength_frames: dict[str, Any] = {}
+        for wavelength in WAVELENGTHS:
+            frame = ttk.Frame(data_tab)
+            frame.grid(row=row, column=0, columnspan=2, sticky="ew", pady=2); row += 1
+            frame.columnconfigure(1, weight=1)
+            ttk.Label(frame, text=f"{wavelength} Offset").grid(row=0, column=0, sticky="w")
+            ttk.Entry(frame, textvariable=self.vars[f"offset{wavelength}"], width=12).grid(row=0, column=1, sticky="ew")
+            ttk.Label(frame, text=f"{wavelength} Fitting Baseline").grid(row=1, column=0, sticky="w")
+            ttk.Entry(frame, textvariable=self.vars[f"baseline{wavelength}"], width=12).grid(row=1, column=1, sticky="ew")
+            ttk.Button(frame, text=f"Configure {wavelength} Fit...",
+                       command=lambda value=wavelength: self.open_fit(value)).grid(row=2, column=0, sticky="ew", pady=2)
+            ttk.Label(frame, textvariable=self.vars[f"fit{wavelength}_status"],
+                      wraplength=180).grid(row=2, column=1, sticky="w")
+            self.wavelength_frames[wavelength] = frame
+            frame.grid_remove()
+        row = self.section(data_tab, row, "Analysis Trace")
+        ttk.Label(data_tab, text="Analysis Wavelength").grid(row=row, column=0, sticky="w")
+        self.analysis_wavelength_box = ttk.Combobox(
+            data_tab, textvariable=self.analysis_wavelength_var, values=["470"], state="readonly", width=19,
+        )
+        self.analysis_wavelength_box.grid(row=row, column=1, sticky="ew"); row += 1
+        self.analysis_wavelength_box.bind("<<ComboboxSelected>>", lambda _event: self.analysis_selection_changed())
+        ttk.Label(data_tab, text="Reference Wavelength").grid(row=row, column=0, sticky="w")
+        self.reference_wavelength_box = ttk.Combobox(
+            data_tab, textvariable=self.reference_wavelength_var, values=["None", "410"], state="readonly", width=19,
+        )
+        self.reference_wavelength_box.grid(row=row, column=1, sticky="ew"); row += 1
+        self.reference_wavelength_box.bind("<<ComboboxSelected>>", lambda _event: self.analysis_selection_changed())
         ttk.Label(data_tab, text="Combine Channels").grid(row=row, column=0, sticky="w")
         self.combine_box = ttk.Combobox(data_tab, textvariable=self.vars["combine"], values=["ratio", "subtraction"], state="readonly", width=19)
         self.combine_box.grid(row=row, column=1, sticky="ew"); row += 1
         self.combine_box.bind("<<ComboboxSelected>>", lambda _event: self.combine_changed())
-        ttk.Button(data_tab, text="Configure 470 Fit...", command=lambda: self.open_fit("470")).grid(row=row, column=0, sticky="ew", pady=2)
-        ttk.Label(data_tab, textvariable=self.vars["fit470_status"], wraplength=180).grid(row=row, column=1, sticky="w"); row += 1
-        self.fit410_button = ttk.Button(data_tab, text="Configure 410 Fit...", command=lambda: self.open_fit("410"))
-        self.fit410_button.grid(row=row, column=0, sticky="ew", pady=2)
-        ttk.Label(data_tab, textvariable=self.vars["fit410_status"], wraplength=180).grid(row=row, column=1, sticky="w"); row += 1
         ttk.Button(data_tab, text="Apply Correction", command=self.apply_processing, style="Accent.TButton").grid(row=row, column=0, columnspan=2, sticky="ew", pady=(8, 3)); row += 1
         row = self.section(data_tab, row, "Markers (Working Copy)")
         self.marker_list = tk.Listbox(data_tab, height=5, exportselection=False, relief="flat", highlightthickness=1)
@@ -701,7 +735,7 @@ class PretreatmentApp:
         self.canvas.mpl_connect("figure_leave_event", self.axis_drag_release)
         self.canvas.mpl_connect("figure_leave_event", self.hover_leave)
         self.canvas.mpl_connect("draw_event", self.cache_hover_background)
-        self.rebuild_axes(); self.method_changed()
+        self.rebuild_axes()
 
     def section(self, parent: Any, row: int, text: str) -> int:
         self.ttk.Separator(parent).grid(row=row, column=0, columnspan=2, sticky="ew", pady=(8, 4)); row += 1
@@ -751,6 +785,8 @@ class PretreatmentApp:
         self.zero_mode_var.set("marker")
         self.zero_marker_var.set("")
         self.source_channel_var.set("CH1")
+        self.analysis_wavelength_var.set("470")
+        self.reference_wavelength_var.set("410")
         self.event_marker_var.set("")
         self.export_annotation_var.set("none")
         self.export_marker_var.set("")
@@ -773,10 +809,12 @@ class PretreatmentApp:
         self.initial_x_limits = None
         self.initial_y_limits = {}
         self.axis_drag_state = None
-        self.fit_regions = {"410": [], "470": []}
-        self.fit_signatures = {"410": None, "470": None}
-        self.fit_models = {"410": None, "470": None}
-        self.fit_baseline_modes = {"410": "fit_constant", "470": "fit_constant"}
+        self.fit_regions = {wavelength: [] for wavelength in WAVELENGTHS}
+        self.fit_signatures = {wavelength: None for wavelength in WAVELENGTHS}
+        self.fit_models = {wavelength: None for wavelength in WAVELENGTHS}
+        self.fit_baseline_modes = {wavelength: "fit_constant" for wavelength in WAVELENGTHS}
+        self.recording_channels = {}
+        self.available_wavelengths = []
         self.active_source_channel = "CH1"
         self.channel_ranges = {}
         self.processed = None
@@ -801,18 +839,28 @@ class PretreatmentApp:
             self.vars["event_status"].set(message)
 
     def current_config(self) -> ProcessingConfig:
-        method = self.vars["method"].get()
-        offset410 = self.number("offset410") if method == "fit_both" else 0.0
-        baseline410 = self.number("baseline410") if method == "fit_both" else 1.0
         smooth_seconds = self.smoothing_seconds()
+        wavelengths = list(self.available_wavelengths)
+        if not wavelengths:
+            raise ValueError("Load a recording containing 410, 470, or 560 data first.")
+        analysis = self.analysis_wavelength_var.get()
+        reference_text = self.reference_wavelength_var.get()
+        reference = None if reference_text in {"", "None"} else reference_text
         config = ProcessingConfig(
-            self.number("range_start"), self.number("range_end"), offset410, self.number("offset470"),
-            baseline410, self.number("baseline470"), method,
-            self.vars["combine"].get(), self.vars["fit_model"].get(), smooth_seconds,
-            list(self.fit_regions["410"]), list(self.fit_regions["470"]),
-            self.fit_models["410"], self.fit_models["470"],
-            self.fit_baseline_modes["410"], self.fit_baseline_modes["470"],
-            self.source_channel_var.get(),
+            range_start_min=self.number("range_start"),
+            range_end_min=self.number("range_end"),
+            offsets={value: self.number(f"offset{value}") for value in wavelengths},
+            baselines={value: self.number(f"baseline{value}") for value in wavelengths},
+            wavelengths=wavelengths,
+            analysis_wavelength=analysis,
+            reference_wavelength=reference,
+            combine=self.vars["combine"].get(),
+            fit_model=self.vars["fit_model"].get(),
+            smooth_seconds=smooth_seconds,
+            fit_regions={value: list(self.fit_regions[value]) for value in wavelengths},
+            fit_models={value: self.fit_models[value] for value in wavelengths},
+            fit_baseline_modes={value: self.fit_baseline_modes[value] for value in wavelengths},
+            source_channel=self.source_channel_var.get(),
         )
         if config.range_end_min <= config.range_start_min:
             raise ValueError("The valid range end must be greater than the start.")
@@ -900,16 +948,17 @@ class PretreatmentApp:
                                  (len(self.data) if self.data is not None else 1))
             self.display_cache.clear()
             if self.processed is not None:
-                for raw, smoothed in (("combined_signal", "combined_signal_smoothed"),
-                                      ("analysis_trace", "analysis_trace_smoothed"),
-                                      ("corrected_470", "corrected_470_smoothed"),
-                                      ("corrected_410", "corrected_410_smoothed"),
-                                      ("dff_percent", "dff_percent_smoothed"),
-                                      ("zscore", "zscore_smoothed"),
-                                      ("dff_470_percent", "dff_470_percent_smoothed"),
-                                      ("dff_410_percent", "dff_410_percent_smoothed"),
-                                      ("zscore_470", "zscore_470_smoothed"),
-                                      ("zscore_410", "zscore_410_smoothed")):
+                pairs = [("combined_signal", "combined_signal_smoothed"),
+                         ("analysis_trace", "analysis_trace_smoothed"),
+                         ("dff_percent", "dff_percent_smoothed"),
+                         ("zscore", "zscore_smoothed")]
+                for wavelength in WAVELENGTHS:
+                    pairs.extend([
+                        (f"corrected_{wavelength}", f"corrected_{wavelength}_smoothed"),
+                        (f"dff_{wavelength}_percent", f"dff_{wavelength}_percent_smoothed"),
+                        (f"zscore_{wavelength}", f"zscore_{wavelength}_smoothed"),
+                    ])
+                for raw, smoothed in pairs:
                     if raw in self.processed:
                         self.processed[smoothed] = self.smooth_array(self.processed[raw].to_numpy(float))
                 if self.normalized and self.details and self.details.get("normalization"):
@@ -927,8 +976,8 @@ class PretreatmentApp:
             messagebox.showerror("Invalid Display Processing Settings", str(exc))
 
     def expected_signature(self, channel: str, config: ProcessingConfig) -> tuple[Any, ...]:
-        offset = config.offset_470 if channel == "470" else config.offset_410
-        baseline = config.baseline_470 if channel == "470" else config.baseline_410
+        offset = config.offsets[channel]
+        baseline = config.baselines[channel]
         model = self.fit_models[channel] or config.fit_model
         baseline_mode = self.fit_baseline_modes[channel] or "fit_constant"
         return (config.range_start_min, config.range_end_min, offset, baseline, model, baseline_mode)
@@ -944,14 +993,12 @@ class PretreatmentApp:
             self.reset_parameters_for_new_recording()
             self.folder = new_folder
             self.data, self.metadata = data, metadata
-            channels = sorted(
-                {str(column)[:-4] for column in data.columns if re.fullmatch(r"CH\d+-410", str(column))
-                 and f"{str(column)[:-4]}-470" in data.columns},
-                key=lambda name: int(name[2:]),
-            )
+            self.recording_channels = available_recording_channels(data)
+            channels = list(self.recording_channels)
             self.source_channel_box.configure(values=channels)
             self.source_channel_var.set(channels[0])
             self.active_source_channel = channels[0]
+            self.configure_available_wavelengths(channels[0])
             self.original_markers = [dict(marker) for marker in markers]
             self.markers = [dict(marker) for marker in markers]
             self.vars["folder"].set(str(self.folder))
@@ -962,29 +1009,70 @@ class PretreatmentApp:
             self.vars["norm_start"].set("0")
             self.vars["norm_end"].set(f"{min(1.0, recording_end):.5f}")
             self.vars["output_name"].set(f"output_{self.folder.name}_{self.source_channel_var.get()}")
-            self.refresh_markers(); self.method_changed()
+            self.refresh_markers(); self.analysis_selection_changed()
             self.vars["status"].set(
-                "Data loaded. The third plot shows the direct raw-channel combination. "
-                "Choose ratio or subtraction, then enter the baseline and set the fitting regions."
+                f"Data loaded with wavelengths {', '.join(self.available_wavelengths)}. "
+                "Enter each visible baseline and set its fitting regions."
             )
         except Exception as exc:
             messagebox.showerror("Load Failed", str(exc))
 
-    def method_changed(self) -> None:
-        fit_both = self.vars["method"].get() == "fit_both"
+    def configure_available_wavelengths(self, source: str) -> None:
+        self.available_wavelengths = list(self.recording_channels.get(source, []))
+        for wavelength, frame in self.wavelength_frames.items():
+            if wavelength in self.available_wavelengths:
+                frame.grid()
+            else:
+                frame.grid_remove()
+        preferred = next((value for value in ("560", "470", "410")
+                          if value in self.available_wavelengths), self.available_wavelengths[0])
+        current_analysis = self.analysis_wavelength_var.get()
+        analysis = current_analysis if current_analysis in self.available_wavelengths else preferred
+        self.analysis_wavelength_box.configure(values=self.available_wavelengths)
+        self.analysis_wavelength_var.set(analysis)
+        reference_values = ["None", *(value for value in self.available_wavelengths if value != analysis)]
+        current_reference = self.reference_wavelength_var.get()
+        if current_reference not in reference_values:
+            current_reference = "410" if "410" in reference_values else "None"
+        self.reference_wavelength_box.configure(values=reference_values)
+        self.reference_wavelength_var.set(current_reference)
+        self.combine_box.configure(state="readonly" if current_reference != "None" else "disabled")
+        available_width_labels = [
+            label for key, label in LINE_WIDTH_LABELS.items()
+            if not re.search(r"(410|470|560)$", key) or key[-3:] in self.available_wavelengths
+        ]
+        self.line_width_box.configure(values=available_width_labels)
+        if self.line_width_selector_var.get() not in available_width_labels:
+            first = f"Raw {analysis}"
+            self.line_width_selector_var.set(first)
+            self.line_width_selection_changed()
+
+    def analysis_selection_changed(self) -> None:
+        analysis = self.analysis_wavelength_var.get()
+        if self.available_wavelengths and analysis not in self.available_wavelengths:
+            return
+        references = ["None", *(value for value in self.available_wavelengths if value != analysis)]
+        self.reference_wavelength_box.configure(values=references)
+        if self.reference_wavelength_var.get() not in references:
+            self.reference_wavelength_var.set("410" if "410" in references else "None")
+        has_reference = self.reference_wavelength_var.get() != "None"
+        self.combine_box.configure(state="readonly" if has_reference else "disabled")
         if self.event_trials is not None:
-            self.clear_event_analysis("Processing method changed. Recalculate the event analysis.")
-        self.fit410_button.configure(state="normal" if fit_both else "disabled")
-        self.combine_box.configure(state="readonly" if fit_both else "disabled")
-        self.rebuild_axes();
+            self.clear_event_analysis("Analysis wavelength changed. Recalculate the event analysis.")
         if self.processed is not None:
-            self.draw_processed()
-        elif self.data is not None:
+            self.processed = None
+            self.details = None
+            self.normalized = False
+            self.display_cache.clear()
+        self.rebuild_axes();
+        if self.data is not None:
             self.draw_raw_preview()
 
     def combine_changed(self) -> None:
         """Refresh the raw preview or corrected combination when its operation changes."""
-        if self.vars["method"].get() != "fit_both":
+        primary = self.analysis_wavelength_var.get()
+        reference = self.reference_wavelength_var.get()
+        if reference in {"", "None"}:
             return
         method = self.vars["combine"].get()
         if self.processed is None:
@@ -992,7 +1080,7 @@ class PretreatmentApp:
             if self.data is not None:
                 self.draw_raw_preview()
                 self.vars["status"].set(
-                    f"Showing the direct raw 470 {'/' if method == 'ratio' else '-'} 410 result."
+                    f"Showing the direct raw {primary} {'/' if method == 'ratio' else '-'} {reference} result."
                 )
             return
 
@@ -1000,23 +1088,23 @@ class PretreatmentApp:
         previous_method = (
             "ratio" if "/" in str((self.details or {}).get("combined_label", "")) else "subtraction"
         )
-        corrected470 = self.processed["corrected_470"].to_numpy(float)
-        corrected410 = self.processed["corrected_410"].to_numpy(float)
+        corrected_primary = self.processed[f"corrected_{primary}"].to_numpy(float)
+        corrected_reference = self.processed[f"corrected_{reference}"].to_numpy(float)
         if method == "ratio":
-            if np.any(np.isfinite(corrected410) & np.isclose(corrected410, 0)):
+            if np.any(np.isfinite(corrected_reference) & np.isclose(corrected_reference, 0)):
                 self.vars["combine"].set(previous_method)
                 messagebox.showerror(
                     "Cannot Calculate Ratio",
-                    "The corrected 410 trace contains zero, so the ratio cannot be calculated.",
+                    f"The corrected {reference} trace contains zero, so the ratio cannot be calculated.",
                 )
                 return
-            combined = corrected470 / corrected410
-            combined_label = "Corrected 470 / 410 ratio"
-            analysis_reference = self.number("baseline470") / self.number("baseline410")
+            combined = corrected_primary / corrected_reference
+            combined_label = f"Corrected {primary} / {reference} ratio"
+            analysis_reference = self.number(f"baseline{primary}") / self.number(f"baseline{reference}")
         elif method == "subtraction":
-            combined = corrected470 - corrected410
-            combined_label = "Corrected 470 - 410"
-            analysis_reference = self.number("baseline470") - self.number("baseline410")
+            combined = corrected_primary - corrected_reference
+            combined_label = f"Corrected {primary} - {reference}"
+            analysis_reference = self.number(f"baseline{primary}") - self.number(f"baseline{reference}")
         else:
             self.vars["combine"].set(previous_method)
             return
@@ -1043,9 +1131,8 @@ class PretreatmentApp:
         source = self.source_channel_box.get().strip() or self.source_channel_var.get().strip()
         if self.data is None or not re.fullmatch(r"CH\d+", source):
             return
-        required = {f"{source}-410", f"{source}-470"}
-        if not required.issubset(self.data.columns):
-            self.vars["status"].set(f"{source} is missing 410 or 470 data.")
+        if source not in self.recording_channels:
+            self.vars["status"].set(f"{source} has no supported 410, 470, or 560 data.")
             return
         # Preserve the range for the channel being left.  A channel that has
         # not been visited starts at the full recording range instead of
@@ -1065,17 +1152,18 @@ class PretreatmentApp:
         # Store the selected value before any redraw.  This avoids a queued
         # canvas draw retaining CH1's processed artists during a CH2 switch.
         self.source_channel_var.set(source)
+        self.configure_available_wavelengths(source)
         self.processed = None
         self.details = None
         self.normalized = False
         self.clear_event_analysis("Apply correction for this recording channel before event analysis.")
         self.display_cache.clear()
-        self.fit_regions = {"410": [], "470": []}
-        self.fit_signatures = {"410": None, "470": None}
-        self.fit_models = {"410": None, "470": None}
-        self.fit_baseline_modes = {"410": "fit_constant", "470": "fit_constant"}
-        self.vars["fit410_status"].set("Not set")
-        self.vars["fit470_status"].set("Not set")
+        self.fit_regions = {wavelength: [] for wavelength in WAVELENGTHS}
+        self.fit_signatures = {wavelength: None for wavelength in WAVELENGTHS}
+        self.fit_models = {wavelength: None for wavelength in WAVELENGTHS}
+        self.fit_baseline_modes = {wavelength: "fit_constant" for wavelength in WAVELENGTHS}
+        for wavelength in WAVELENGTHS:
+            self.vars[f"fit{wavelength}_status"].set("Not set")
         if self.folder is not None:
             self.vars["output_name"].set(f"output_{self.folder.name}_{source}")
         self.rebuild_axes()
@@ -1110,8 +1198,7 @@ class PretreatmentApp:
             return
         try:
             config = self.current_config()
-            required = ["470"] + (["410"] if config.method == "fit_both" else [])
-            for channel in required:
+            for channel in config.wavelengths:
                 if not self.fit_regions[channel]:
                     raise ValueError(f"Select and confirm fitting regions in the {channel} fitting window first.")
                 if self.fit_signatures[channel] != self.expected_signature(channel, config):
@@ -1130,14 +1217,15 @@ class PretreatmentApp:
             messagebox.showerror("Processing Failed", str(exc)); self.vars["status"].set(f"Processing failed: {exc}")
 
     def rebuild_axes(self) -> None:
-        method = self.vars["method"].get()
-        keys = ["470"]
-        if method == "fit_both":
-            keys.append("410")
+        wavelengths = list(self.available_wavelengths) or [self.analysis_wavelength_var.get()]
+        keys = list(wavelengths)
+        has_reference = self.reference_wavelength_var.get() not in {"", "None"}
+        if has_reference:
             keys.append(self.vars["combine"].get())
         if self.normalized:
-            if method == "fit_both":
-                keys.extend(["dff470", "dff410", "dff", "zscore470", "zscore410", "zscore"])
+            if has_reference or len(wavelengths) > 1:
+                keys.extend([*(f"dff{value}" for value in wavelengths), "dff",
+                             *(f"zscore{value}" for value in wavelengths), "zscore"])
             else:
                 keys.extend(["dff", "zscore"])
         for selector in self.zoom_selectors:
@@ -1483,28 +1571,29 @@ class PretreatmentApp:
             return
         subset = self.data.loc[use]; full_x = subset["TimeStamp"].to_numpy(float) / 60000
         x = full_x
-        raw470 = subset[f"{source}-470"].to_numpy(float)
-        raw410 = subset[f"{source}-410"].to_numpy(float)
+        raw = {wavelength: subset[f"{source}-{wavelength}"].to_numpy(float)
+               for wavelength in self.available_wavelengths}
+        primary = self.analysis_wavelength_var.get()
+        reference = self.reference_wavelength_var.get()
         for ax, key in zip(self.axes, self.axis_keys):
             ax.clear()
-            if key == "470":
-                ax.plot(x, raw470, color="#2E8B57", lw=self.line_width("raw470"),
-                        gid="raw470"); ax.set_ylabel(f"Raw {source} 470")
-            elif key == "410":
-                ax.plot(x, raw410, color="#2F6FB0", lw=self.line_width("raw410"),
-                        gid="raw410"); ax.set_ylabel(f"Raw {source} 410")
+            if key in raw:
+                color = WAVELENGTH_COLORS[key][0]
+                ax.plot(x, raw[key], color=color, lw=self.line_width(f"raw{key}"),
+                        gid=f"raw{key}"); ax.set_ylabel(f"Raw {source} {key}")
             elif key == "ratio":
-                direct = np.full(len(raw470), np.nan, dtype=float)
-                valid = np.isfinite(raw470) & np.isfinite(raw410) & ~np.isclose(raw410, 0)
-                np.divide(raw470, raw410, out=direct, where=valid)
+                direct = np.full(len(raw[primary]), np.nan, dtype=float)
+                valid = (np.isfinite(raw[primary]) & np.isfinite(raw[reference])
+                         & ~np.isclose(raw[reference], 0))
+                np.divide(raw[primary], raw[reference], out=direct, where=valid)
                 ax.plot(x, direct, color="#7B4B94", lw=self.line_width("combined"),
                         gid="combined")
-                ax.set_ylabel("Raw 470 / 410")
+                ax.set_ylabel(f"Raw {primary} / {reference}")
             elif key == "subtraction":
-                direct = raw470 - raw410
+                direct = raw[primary] - raw[reference]
                 ax.plot(x, direct, color="#7B4B94", lw=self.line_width("combined"),
                         gid="combined")
-                ax.set_ylabel("Raw 470 - 410")
+                ax.set_ylabel(f"Raw {primary} - {reference}")
             else:
                 ax.text(0.5, 0.5, "Apply fitting to display combined trace", ha="center", va="center", transform=ax.transAxes)
                 ax.set_ylabel(key)
@@ -1524,59 +1613,42 @@ class PretreatmentApp:
         view = self.trace_view_var.get()
         for ax, key in zip(self.axes, self.axis_keys):
             ax.clear()
-            if key == "470":
+            if key in self.available_wavelengths:
+                raw_color, corrected_color = WAVELENGTH_COLORS[key]
                 if view != "corrected_only":
-                    ax.plot(x, self.display_values("offset_adjusted_470")[indices], color="#4BAF72",
-                            lw=self.line_width("raw470"), alpha=0.72,
-                            label="Original 470 after offset", gid="raw470")
+                    ax.plot(x, self.display_values(f"offset_adjusted_{key}")[indices], color=raw_color,
+                            lw=self.line_width(f"raw{key}"), alpha=0.72,
+                            label=f"Original {key} after offset", gid=f"raw{key}")
                 if self.show_fit_var.get():
-                    ax.plot(x, d["fit_470"].to_numpy()[indices], color="#D62728", ls="--",
-                            lw=self.line_width("fit470"), label="470 fit", gid="fit470")
+                    ax.plot(x, d[f"fit_{key}"].to_numpy()[indices], color="#D62728", ls="--",
+                            lw=self.line_width(f"fit{key}"), label=f"{key} fit", gid=f"fit{key}")
                 if view != "raw_only":
-                    ax.plot(x, self.display_values("corrected_470")[indices], color="#006D3C",
-                            lw=self.line_width("corrected470"), label="Corrected 470", gid="corrected470")
-                ax.set_ylabel("470 fluorescence")
-                ax.legend(frameon=False, ncol=3, loc="lower right", bbox_to_anchor=(1, 1.01),
-                          borderaxespad=0, fontsize=8)
-            elif key == "410":
-                if view != "corrected_only":
-                    ax.plot(x, self.display_values("offset_adjusted_410")[indices], color="#4D8FCC",
-                            lw=self.line_width("raw410"), alpha=0.72,
-                            label="Original 410 after offset", gid="raw410")
-                if self.show_fit_var.get():
-                    ax.plot(x, d["fit_410"].to_numpy()[indices], color="#D62728", ls="--",
-                            lw=self.line_width("fit410"), label="410 fit", gid="fit410")
-                if view != "raw_only":
-                    ax.plot(x, self.display_values("corrected_410")[indices], color="#15558D",
-                            lw=self.line_width("corrected410"), label="Corrected 410", gid="corrected410")
-                ax.set_ylabel("410 fluorescence")
+                    ax.plot(x, self.display_values(f"corrected_{key}")[indices], color=corrected_color,
+                            lw=self.line_width(f"corrected{key}"), label=f"Corrected {key}",
+                            gid=f"corrected{key}")
+                ax.set_ylabel(f"{key} fluorescence")
                 ax.legend(frameon=False, ncol=3, loc="lower right", bbox_to_anchor=(1, 1.01),
                           borderaxespad=0, fontsize=8)
             elif key == "ratio":
                 ax.plot(x, self.display_values("combined_signal")[indices], color="#7B4B94",
                         lw=self.line_width("combined"), gid="combined")
-                ax.set_ylabel("470 / 410 ratio")
+                ax.set_ylabel(self.details.get("combined_label") or "Corrected ratio")
             elif key == "subtraction":
                 ax.plot(x, self.display_values("combined_signal")[indices], color="#7B4B94",
                         lw=self.line_width("combined"), gid="combined")
-                ax.set_ylabel("470 - 410")
+                ax.set_ylabel(self.details.get("combined_label") or "Corrected subtraction")
             elif key == "dff":
                 ax.plot(x, self.display_values("dff_percent")[indices], color="#7B4B94",
                         lw=self.line_width("dff"), gid="dff")
                 ax.axhline(0, color="#777777", lw=0.7, alpha=0.7)
                 ax.set_ylabel("dF/F0 (%)")
                 self.shade_normalization_baseline(ax)
-            elif key == "dff470":
-                ax.plot(x, self.display_values("dff_470_percent")[indices], color="#006D3C",
-                        lw=self.line_width("dff"), gid="dff")
+            elif key.startswith("dff") and key[3:] in self.available_wavelengths:
+                wavelength = key[3:]
+                ax.plot(x, self.display_values(f"dff_{wavelength}_percent")[indices],
+                        color=WAVELENGTH_COLORS[wavelength][1], lw=self.line_width("dff"), gid="dff")
                 ax.axhline(0, color="#777777", lw=0.7, alpha=0.7)
-                ax.set_ylabel("470 dF/F0 (%)")
-                self.shade_normalization_baseline(ax)
-            elif key == "dff410":
-                ax.plot(x, self.display_values("dff_410_percent")[indices], color="#15558D",
-                        lw=self.line_width("dff"), gid="dff")
-                ax.axhline(0, color="#777777", lw=0.7, alpha=0.7)
-                ax.set_ylabel("410 dF/F0 (%)")
+                ax.set_ylabel(f"{wavelength} dF/F0 (%)")
                 self.shade_normalization_baseline(ax)
             elif key == "zscore":
                 ax.plot(x, self.display_values("zscore")[indices], color="#7B4B94",
@@ -1584,22 +1656,17 @@ class PretreatmentApp:
                 ax.axhline(0, color="#777777", lw=0.7, alpha=0.7)
                 ax.set_ylabel("Z-score")
                 self.shade_normalization_baseline(ax)
-            elif key == "zscore470":
-                ax.plot(x, self.display_values("zscore_470")[indices], color="#006D3C",
-                        lw=self.line_width("zscore"), gid="zscore")
+            elif key.startswith("zscore") and key[6:] in self.available_wavelengths:
+                wavelength = key[6:]
+                ax.plot(x, self.display_values(f"zscore_{wavelength}")[indices],
+                        color=WAVELENGTH_COLORS[wavelength][1], lw=self.line_width("zscore"), gid="zscore")
                 ax.axhline(0, color="#777777", lw=0.7, alpha=0.7)
-                ax.set_ylabel("470 Z-score")
-                self.shade_normalization_baseline(ax)
-            elif key == "zscore410":
-                ax.plot(x, self.display_values("zscore_410")[indices], color="#15558D",
-                        lw=self.line_width("zscore"), gid="zscore")
-                ax.axhline(0, color="#777777", lw=0.7, alpha=0.7)
-                ax.set_ylabel("410 Z-score")
+                ax.set_ylabel(f"{wavelength} Z-score")
                 self.shade_normalization_baseline(ax)
             self.style_axis(ax)
-        model_title = f"470={self.fit_models['470']}"
-        if "410" in self.axis_keys:
-            model_title += f" | 410={self.fit_models['410']}"
+        model_title = " | ".join(
+            f"{wavelength}={self.fit_models[wavelength]}" for wavelength in self.available_wavelengths
+        )
         self.figure.suptitle(f"RWD fiber pretreatment | {self.source_channel_var.get()} | {model_title}", fontsize=11)
         zero_time = self.details.get("normalization", {}).get("zero_time_min") if self.details and self.details.get("normalization") else None
         self.axes[-1].set_xlabel("Time relative to zero (min)" if zero_time is not None else "Recording time (min)")
@@ -1892,7 +1959,8 @@ class PretreatmentApp:
             event_details["smoothing_seconds"] = self.smoothing_seconds()
             event_details["source_channel"] = self.source_channel_var.get()
             event_details["corrected_trace_label"] = (
-                self.details.get("combined_label") or "Corrected 470"
+                self.details.get("combined_label")
+                or f"Corrected {self.details.get('analysis_wavelength', self.analysis_wavelength_var.get())}"
             )
             self.event_trials = trials
             self.event_average = average
@@ -2176,10 +2244,11 @@ class PretreatmentApp:
             raise ValueError("No data are available for export.")
         indices = self.display_indices(len(self.processed))
         frame = self.processed.iloc[indices].copy().reset_index(drop=True)
-        signal_columns = [
-            "corrected_470", "corrected_410", "combined_signal", "analysis_trace",
-            "dff_percent", "zscore", "dff_470_percent", "dff_410_percent", "zscore_470", "zscore_410",
-        ]
+        signal_columns = ["combined_signal", "analysis_trace", "dff_percent", "zscore"]
+        for wavelength in WAVELENGTHS:
+            signal_columns.extend([
+                f"corrected_{wavelength}", f"dff_{wavelength}_percent", f"zscore_{wavelength}",
+            ])
         for column in signal_columns:
             if column not in self.processed:
                 continue
@@ -2247,16 +2316,17 @@ class PretreatmentApp:
                 return
         try:
             self.display_cache.clear()
-            for raw, smoothed in (("combined_signal", "combined_signal_smoothed"),
-                                  ("analysis_trace", "analysis_trace_smoothed"),
-                                  ("corrected_470", "corrected_470_smoothed"),
-                                  ("corrected_410", "corrected_410_smoothed"),
-                                  ("dff_percent", "dff_percent_smoothed"),
-                                  ("zscore", "zscore_smoothed"),
-                                  ("dff_470_percent", "dff_470_percent_smoothed"),
-                                  ("dff_410_percent", "dff_410_percent_smoothed"),
-                                  ("zscore_470", "zscore_470_smoothed"),
-                                  ("zscore_410", "zscore_410_smoothed")):
+            pairs = [("combined_signal", "combined_signal_smoothed"),
+                     ("analysis_trace", "analysis_trace_smoothed"),
+                     ("dff_percent", "dff_percent_smoothed"),
+                     ("zscore", "zscore_smoothed")]
+            for wavelength in WAVELENGTHS:
+                pairs.extend([
+                    (f"corrected_{wavelength}", f"corrected_{wavelength}_smoothed"),
+                    (f"dff_{wavelength}_percent", f"dff_{wavelength}_percent_smoothed"),
+                    (f"zscore_{wavelength}", f"zscore_{wavelength}_smoothed"),
+                ])
+            for raw, smoothed in pairs:
                 if raw in self.processed:
                     self.processed[smoothed] = self.smooth_array(self.processed[raw].to_numpy(float))
             export_frame, _export_indices = self.prepared_export_frame()
@@ -2273,13 +2343,12 @@ class PretreatmentApp:
                 )
             time_columns = ["original_time_s", "original_time_min", "relative_time_s", "relative_time_min"]
             if selections["corrected_csv"]:
-                corrected_columns = time_columns + ["corrected_470"]
-                if "corrected_470_unsmoothed" in export_frame:
-                    corrected_columns.append("corrected_470_unsmoothed")
-                if self.vars["method"].get() == "fit_both":
-                    corrected_columns.append("corrected_410")
-                    if "corrected_410_unsmoothed" in export_frame:
-                        corrected_columns.append("corrected_410_unsmoothed")
+                corrected_columns = list(time_columns)
+                for wavelength in self.available_wavelengths:
+                    corrected_columns.append(f"corrected_{wavelength}")
+                    if f"corrected_{wavelength}_unsmoothed" in export_frame:
+                        corrected_columns.append(f"corrected_{wavelength}_unsmoothed")
+                if self.reference_wavelength_var.get() != "None":
                     corrected_columns.append("combined_signal")
                     if "combined_signal_unsmoothed" in export_frame:
                         corrected_columns.append("combined_signal_unsmoothed")
@@ -2292,9 +2361,9 @@ class PretreatmentApp:
                 )
             if selections["dff_csv"]:
                 dff_columns = time_columns + ["dff_percent"]
-                if self.vars["method"].get() == "fit_both":
-                    dff_columns.extend(["dff_470_percent", "dff_410_percent"])
-                    for column in ("dff_470_percent_unsmoothed", "dff_410_percent_unsmoothed"):
+                for wavelength in self.available_wavelengths:
+                    dff_columns.append(f"dff_{wavelength}_percent")
+                    for column in (f"dff_{wavelength}_percent_unsmoothed",):
                         if column in export_frame:
                             dff_columns.append(column)
                 if "dff_percent_unsmoothed" in export_frame:
@@ -2305,9 +2374,9 @@ class PretreatmentApp:
                 )
             if selections["zscore_csv"]:
                 zscore_columns = time_columns + ["zscore"]
-                if self.vars["method"].get() == "fit_both":
-                    zscore_columns.extend(["zscore_470", "zscore_410"])
-                    for column in ("zscore_470_unsmoothed", "zscore_410_unsmoothed"):
+                for wavelength in self.available_wavelengths:
+                    zscore_columns.append(f"zscore_{wavelength}")
+                    for column in (f"zscore_{wavelength}_unsmoothed",):
                         if column in export_frame:
                             zscore_columns.append(column)
                 if "zscore_unsmoothed" in export_frame:
@@ -2320,36 +2389,37 @@ class PretreatmentApp:
             annotation_limits, annotation_label = self.resolve_export_annotation()
             if selections["corrected_png"]:
                 corrected_panels = [
-                    ("Corrected 470", self.display_values("corrected_470"), "#006D3C", "corrected470")
+                    (f"Corrected {wavelength}", self.display_values(f"corrected_{wavelength}"),
+                     WAVELENGTH_COLORS[wavelength][1], f"corrected{wavelength}")
+                    for wavelength in self.available_wavelengths
                 ]
-                if self.vars["method"].get() == "fit_both":
-                    corrected_panels.append(
-                        ("Corrected 410", self.display_values("corrected_410"), "#15558D", "corrected410")
-                    )
+                if self.reference_wavelength_var.get() != "None":
                     corrected_panels.append((self.details.get("combined_label") or "Analysis trace",
                                              self.display_values("analysis_trace"), "#7B4B94", "combined"))
                 self.save_trace_png(output / "corrected_fluorescence_trace.png", corrected_panels,
                                     "Corrected fluorescence traces", annotation_limits)
             if selections["dff_png"] or selections["dff_svg"]:
-                dff_panels = [("Ratio dF/F0 (%)", self.display_values("dff_percent"), "#7B4B94", "dff")]
-                if self.vars["method"].get() == "fit_both":
-                    dff_panels = [
-                        ("470 dF/F0 (%)", self.display_values("dff_470_percent"), "#006D3C", "dff"),
-                        ("410 dF/F0 (%)", self.display_values("dff_410_percent"), "#15558D", "dff"),
-                        *dff_panels,
-                    ]
+                dff_panels = [
+                    (f"{wavelength} dF/F0 (%)", self.display_values(f"dff_{wavelength}_percent"),
+                     WAVELENGTH_COLORS[wavelength][1], "dff")
+                    for wavelength in self.available_wavelengths
+                ]
+                if self.reference_wavelength_var.get() != "None":
+                    dff_panels.append(((self.details.get("combined_label") or "Analysis trace") + " dF/F0 (%)",
+                                       self.display_values("dff_percent"), "#7B4B94", "dff"))
                 if selections["dff_png"]:
                     self.save_trace_png(output / "dFF0_trace.png", dff_panels, "dF/F0", annotation_limits)
                 if selections["dff_svg"]:
                     self.save_trace_png(output / "dFF0_trace.svg", dff_panels, "dF/F0", annotation_limits)
             if selections["zscore_png"] or selections["zscore_svg"]:
-                z_panels = [("Ratio Z-score", self.display_values("zscore"), "#7B4B94", "zscore")]
-                if self.vars["method"].get() == "fit_both":
-                    z_panels = [
-                        ("470 Z-score", self.display_values("zscore_470"), "#006D3C", "zscore"),
-                        ("410 Z-score", self.display_values("zscore_410"), "#15558D", "zscore"),
-                        *z_panels,
-                    ]
+                z_panels = [
+                    (f"{wavelength} Z-score", self.display_values(f"zscore_{wavelength}"),
+                     WAVELENGTH_COLORS[wavelength][1], "zscore")
+                    for wavelength in self.available_wavelengths
+                ]
+                if self.reference_wavelength_var.get() != "None":
+                    z_panels.append(((self.details.get("combined_label") or "Analysis trace") + " Z-score",
+                                     self.display_values("zscore"), "#7B4B94", "zscore"))
                 if selections["zscore_png"]:
                     self.save_trace_png(output / "zscore_trace.png", z_panels, "Z-score", annotation_limits)
                 if selections["zscore_svg"]:
