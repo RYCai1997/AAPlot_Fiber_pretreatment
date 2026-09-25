@@ -1,7 +1,8 @@
-"""Read-only data loading and independent-channel photometry fitting."""
+"""Read-only data loading and wavelength-independent photometry fitting."""
 from __future__ import annotations
 
 import uuid
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -15,20 +16,35 @@ from scipy.optimize import least_squares
 class ProcessingConfig:
     range_start_min: float
     range_end_min: float
-    offset_410: float
-    offset_470: float
-    baseline_410: float
-    baseline_470: float
-    method: str = "fit_both"  # fit_both | fit_470_only
+    offsets: dict[str, float] = field(default_factory=dict)
+    baselines: dict[str, float] = field(default_factory=dict)
+    wavelengths: list[str] = field(default_factory=list)
+    analysis_wavelength: str = "470"
+    reference_wavelength: str | None = "410"
     combine: str = "ratio"  # ratio | subtraction
     fit_model: str = "double_exponential"
     smooth_seconds: float = 10.0
-    fit_regions_410: list[tuple[float, float]] = field(default_factory=list)
-    fit_regions_470: list[tuple[float, float]] = field(default_factory=list)
-    fit_model_410: str | None = None
-    fit_model_470: str | None = None
-    fit_baseline_mode_410: str | None = "fit_constant"
-    fit_baseline_mode_470: str | None = "fit_constant"
+    fit_regions: dict[str, list[tuple[float, float]]] = field(default_factory=dict)
+    fit_models: dict[str, str | None] = field(default_factory=dict)
+    fit_baseline_modes: dict[str, str | None] = field(default_factory=dict)
+    source_channel: str = "CH1"
+
+
+SUPPORTED_WAVELENGTHS = ("410", "470", "560")
+
+
+def available_recording_channels(data: pd.DataFrame) -> dict[str, list[str]]:
+    """Return acquisition channels and their available supported wavelengths."""
+    found: dict[str, list[str]] = {}
+    for column in data.columns:
+        match = re.fullmatch(r"(CH\d+)-(410|470|560)", str(column))
+        if match:
+            found.setdefault(match.group(1), []).append(match.group(2))
+    order = {wavelength: index for index, wavelength in enumerate(SUPPORTED_WAVELENGTHS)}
+    return {
+        channel: sorted(set(wavelengths), key=lambda value: order[value])
+        for channel, wavelengths in sorted(found.items(), key=lambda item: int(item[0][2:]))
+    }
 
 
 def load_recording(folder: Path) -> tuple[pd.DataFrame, list[dict[str, Any]], str]:
@@ -37,15 +53,22 @@ def load_recording(folder: Path) -> tuple[pd.DataFrame, list[dict[str, Any]], st
         raise FileNotFoundError(f"File not found: {path}")
     with path.open("r", encoding="utf-8-sig", errors="replace") as handle:
         metadata = handle.readline().strip()
-    data = pd.read_csv(path, skiprows=1)
+    data = pd.read_csv(path, skiprows=1, low_memory=False)
     data = data.loc[:, ~data.columns.astype(str).str.startswith("Unnamed")]
-    required = ["TimeStamp", "CH1-410", "CH1-470"]
-    missing = [column for column in required if column not in data]
-    if missing:
-        raise ValueError(f"Fluorescence.csv is missing required columns: {', '.join(missing)}")
-    for column in required:
+    if "TimeStamp" not in data:
+        raise ValueError("Fluorescence.csv is missing the required TimeStamp column.")
+    channels = available_recording_channels(data)
+    if not channels:
+        raise ValueError(
+            "Fluorescence.csv does not contain any supported fluorescence columns "
+            "(expected CH<n>-410, CH<n>-470, or CH<n>-560)."
+        )
+    numeric_columns = ["TimeStamp", *(f"{channel}-{wavelength}"
+                                      for channel, wavelengths in channels.items()
+                                      for wavelength in wavelengths)]
+    for column in numeric_columns:
         data[column] = pd.to_numeric(data[column], errors="coerce")
-    data = data.dropna(subset=required).sort_values("TimeStamp").reset_index(drop=True)
+    data = data.dropna(subset=["TimeStamp"]).sort_values("TimeStamp").reset_index(drop=True)
     if len(data) < 20:
         raise ValueError("Fewer than 20 valid data points are available.")
 
@@ -311,85 +334,101 @@ def process_data(data: pd.DataFrame, config: ProcessingConfig) -> tuple[pd.DataF
     time_min = time_s / 60
     dt = np.diff(time_s)
     sample_rate = float(1 / np.median(dt[dt > 0]))
-    raw410 = subset["CH1-410"].to_numpy(float)
-    raw470 = subset["CH1-470"].to_numpy(float)
-    adjusted410 = raw410 - config.offset_410
-    adjusted470 = raw470 - config.offset_470
+    source = config.source_channel
+    available = available_recording_channels(subset).get(source, [])
+    wavelengths = [str(value) for value in config.wavelengths if str(value) in available]
+    if not wavelengths:
+        raise ValueError(f"{source} has no selected 410, 470, or 560 fluorescence channel.")
+    if config.analysis_wavelength not in wavelengths:
+        raise ValueError(f"Analysis wavelength {config.analysis_wavelength} is unavailable in {source}.")
+    if config.reference_wavelength is not None and config.reference_wavelength not in wavelengths:
+        raise ValueError(f"Reference wavelength {config.reference_wavelength} is unavailable in {source}.")
+    if config.reference_wavelength == config.analysis_wavelength:
+        raise ValueError("The analysis and reference wavelengths must be different.")
 
-    mask470 = region_mask(time_min, config.fit_regions_470)
-    model470 = config.fit_model_470 or config.fit_model
-    baseline_mode470 = config.fit_baseline_mode_470 or "fit_constant"
-    fit470, parameters470 = fit_bleaching(
-        time_s, adjusted470, config.baseline_470, model470, mask470, baseline_mode470
-    )
-    parameters470["fit_regions"] = [list(region) for region in config.fit_regions_470]
-    if np.any(np.isclose(fit470, 0)):
-        raise ValueError("The fitted 470 curve contains zero. Adjust the baseline, offset, or fitting regions.")
-    corrected470 = adjusted470 / fit470 * config.baseline_470
+    output_columns: dict[str, np.ndarray] = {}
+    fit_parameters: dict[str, dict[str, Any]] = {}
+    corrected: dict[str, np.ndarray] = {}
+    masks: dict[str, np.ndarray] = {}
+    for wavelength in wavelengths:
+        column = f"{source}-{wavelength}"
+        raw = subset[column].to_numpy(float)
+        if np.isfinite(raw).sum() < 20:
+            raise ValueError(f"{column} contains fewer than 20 valid samples in the selected range.")
+        offset = float(config.offsets[wavelength])
+        baseline = float(config.baselines[wavelength])
+        adjusted = raw - offset
+        mask = region_mask(time_min, config.fit_regions.get(wavelength, []))
+        model = config.fit_models.get(wavelength) or config.fit_model
+        baseline_mode = config.fit_baseline_modes.get(wavelength) or "fit_constant"
+        fitted, parameters = fit_bleaching(time_s, adjusted, baseline, model, mask, baseline_mode)
+        parameters["fit_regions"] = [list(region) for region in config.fit_regions.get(wavelength, [])]
+        if np.any(np.isfinite(fitted) & np.isclose(fitted, 0)):
+            raise ValueError(
+                f"The fitted {wavelength} curve contains zero. Adjust its baseline, offset, or fitting regions."
+            )
+        channel_corrected = adjusted / fitted * baseline
+        output_columns[f"raw_{wavelength}"] = raw
+        output_columns[f"offset_adjusted_{wavelength}"] = adjusted
+        output_columns[f"fit_{wavelength}"] = fitted
+        output_columns[f"corrected_{wavelength}"] = channel_corrected
+        output_columns[f"fit_used_{wavelength}"] = mask.astype(int)
+        corrected[wavelength] = channel_corrected
+        masks[wavelength] = mask
+        fit_parameters[wavelength] = parameters
 
-    fit410 = np.full(len(subset), np.nan)
-    corrected410 = np.full(len(subset), np.nan)
-    parameters410: dict[str, Any] | None = None
+    primary = config.analysis_wavelength
+    reference = config.reference_wavelength
     combined = np.full(len(subset), np.nan)
     combined_label: str | None = None
-    mask410 = np.zeros(len(subset), dtype=bool)
-    if config.method == "fit_both":
-        mask410 = region_mask(time_min, config.fit_regions_410)
-        model410 = config.fit_model_410 or config.fit_model
-        baseline_mode410 = config.fit_baseline_mode_410 or "fit_constant"
-        fit410, parameters410 = fit_bleaching(
-            time_s, adjusted410, config.baseline_410, model410, mask410, baseline_mode410
-        )
-        parameters410["fit_regions"] = [list(region) for region in config.fit_regions_410]
-        if np.any(np.isclose(fit410, 0)):
-            raise ValueError("The fitted 410 curve contains zero. Adjust the baseline, offset, or fitting regions.")
-        corrected410 = adjusted410 / fit410 * config.baseline_410
+    if reference is not None:
         if config.combine == "ratio":
-            if np.any(np.isclose(corrected410, 0)):
-                raise ValueError("The corrected 410 trace contains zero, so the ratio cannot be calculated.")
-            combined = corrected470 / corrected410
-            combined_label = "Corrected 470 / 410 ratio"
-            analysis_reference = config.baseline_470 / config.baseline_410
+            if np.any(np.isfinite(corrected[reference]) & np.isclose(corrected[reference], 0)):
+                raise ValueError(
+                    f"The corrected {reference} trace contains zero, so the ratio cannot be calculated."
+                )
+            combined = corrected[primary] / corrected[reference]
+            combined_label = f"Corrected {primary} / {reference} ratio"
+            analysis_reference = config.baselines[primary] / config.baselines[reference]
         elif config.combine == "subtraction":
-            combined = corrected470 - corrected410
-            combined_label = "Corrected 470 - 410"
-            analysis_reference = config.baseline_470 - config.baseline_410
+            combined = corrected[primary] - corrected[reference]
+            combined_label = f"Corrected {primary} - {reference}"
+            analysis_reference = config.baselines[primary] - config.baselines[reference]
         else:
             raise ValueError(f"Unknown combination method: {config.combine}")
-
         analysis_trace = combined.copy()
     else:
-        analysis_trace = corrected470.copy()
-        analysis_reference = config.baseline_470
+        analysis_trace = corrected[primary].copy()
+        analysis_reference = config.baselines[primary]
 
     smooth_points = max(1, int(round(config.smooth_seconds * sample_rate)))
     combined_smoothed = (pd.Series(combined).rolling(smooth_points, center=True, min_periods=1).mean().to_numpy()
-                         if config.method == "fit_both" else combined.copy())
+                         if reference is not None else combined.copy())
     analysis_smoothed = pd.Series(analysis_trace).rolling(smooth_points, center=True, min_periods=1).mean().to_numpy()
     empty = np.full(len(subset), np.nan)
     output = pd.DataFrame({
         "time_s": time_s, "time_min": time_min,
         "original_time_s": time_s, "original_time_min": time_min,
         "relative_time_s": time_s, "relative_time_min": time_min,
-        "raw_410": raw410, "raw_470": raw470,
-        "offset_adjusted_410": adjusted410, "offset_adjusted_470": adjusted470,
-        "fit_410": fit410, "fit_470": fit470,
-        "corrected_410": corrected410, "corrected_470": corrected470,
+        **output_columns,
         "combined_signal": combined, "combined_signal_smoothed": combined_smoothed,
         "analysis_trace": analysis_trace, "analysis_trace_smoothed": analysis_smoothed,
         "dff_percent": empty.copy(), "dff_percent_smoothed": empty.copy(),
         "zscore": empty.copy(), "zscore_smoothed": empty.copy(),
         "normalization_baseline": np.zeros(len(subset), dtype=int),
-        "fit_used_410": mask410.astype(int), "fit_used_470": mask470.astype(int),
     })
     details = {
         "sample_rate_hz": sample_rate,
         "rows": int(len(output)),
         "combined_label": combined_label,
-        "fit_410_parameters": parameters410,
-        "fit_470_parameters": parameters470,
+        "wavelengths": wavelengths,
+        "analysis_wavelength": primary,
+        "reference_wavelength": reference,
+        "fit_parameters": fit_parameters,
+        **{f"fit_{wavelength}_parameters": fit_parameters[wavelength] for wavelength in wavelengths},
         "analysis_reference_from_user_baselines": float(analysis_reference),
         "normalization": None,
+        "source_channel": source,
         "definitions": {
             "baseline": "user value is either a fixed model constant or the initial estimate for a fitted constant, as recorded per channel",
             "corrected_channel": "(raw - offset) / independently fitted bleaching * user baseline",
@@ -436,6 +475,44 @@ def calculate_normalized_traces(
     result["zscore_smoothed"] = pd.Series(zscore).rolling(
         smooth_points, center=True, min_periods=1
     ).mean().to_numpy()
+    # Retain every independently corrected wavelength as a first-class output.
+    # The legacy dff_percent/zscore names continue to mean the selected analysis trace.
+    corrected_columns = sorted(
+        (str(column).removeprefix("corrected_"), str(column))
+        for column in result.columns if re.fullmatch(r"corrected_(410|470|560)", str(column))
+    )
+    channel_normalization: dict[str, dict[str, float]] = {}
+    for label, column in corrected_columns:
+        values = result[column].to_numpy(float)
+        valid_baseline = baseline_mask & np.isfinite(values)
+        if valid_baseline.sum() < 20:
+            result[f"dff_{label}_percent"] = np.full(len(result), np.nan)
+            result[f"zscore_{label}"] = np.full(len(result), np.nan)
+            result[f"dff_{label}_percent_smoothed"] = np.full(len(result), np.nan)
+            result[f"zscore_{label}_smoothed"] = np.full(len(result), np.nan)
+            continue
+        channel_f0 = float(np.mean(values[valid_baseline]))
+        if not np.isfinite(channel_f0) or np.isclose(channel_f0, 0):
+            raise ValueError(f"F0 for corrected {label} is zero or invalid.")
+        channel_dff = 100.0 * (values - channel_f0) / channel_f0
+        baseline_channel_dff = channel_dff[valid_baseline]
+        channel_sd = float(np.std(baseline_channel_dff, ddof=1))
+        if not np.isfinite(channel_sd) or channel_sd <= np.finfo(float).eps:
+            raise ValueError(f"The baseline standard deviation for corrected {label} is zero.")
+        channel_z = (channel_dff - float(np.mean(baseline_channel_dff))) / channel_sd
+        result[f"dff_{label}_percent"] = channel_dff
+        result[f"zscore_{label}"] = channel_z
+        result[f"dff_{label}_percent_smoothed"] = pd.Series(channel_dff).rolling(
+            smooth_points, center=True, min_periods=1
+        ).mean().to_numpy()
+        result[f"zscore_{label}_smoothed"] = pd.Series(channel_z).rolling(
+            smooth_points, center=True, min_periods=1
+        ).mean().to_numpy()
+        channel_normalization[label] = {
+            "f0_mean": channel_f0,
+            "dff_baseline_mean": float(np.mean(baseline_channel_dff)),
+            "dff_baseline_sd": channel_sd,
+        }
     result["normalization_baseline"] = baseline_mask.astype(int)
     if zero_time_min is None:
         result["relative_time_min"] = time_min
@@ -452,5 +529,152 @@ def calculate_normalized_traces(
         "dff_baseline_sd": z_scale,
         "smooth_seconds": float(smooth_seconds),
         "zero_time_min": None if zero_time_min is None else float(zero_time_min),
+        "channels": channel_normalization,
     }
     return result, details
+
+
+def calculate_event_locked_traces(
+    processed: pd.DataFrame,
+    marker_times_min: list[float],
+    marker_name: str,
+    pre_seconds: float,
+    post_seconds: float,
+    baseline_seconds: float,
+    signal_column: str = "analysis_trace",
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
+    """Split a corrected signal around repeated events and normalize each trial independently."""
+    if signal_column not in processed:
+        raise ValueError(f"The corrected signal column '{signal_column}' is unavailable.")
+    if pre_seconds <= 0 or post_seconds <= 0:
+        raise ValueError("The pre-marker and post-marker trace durations must both be greater than 0 seconds.")
+    if baseline_seconds <= 0:
+        raise ValueError("The event baseline duration must be greater than 0 seconds.")
+    if baseline_seconds > pre_seconds:
+        raise ValueError("The event baseline duration cannot exceed the pre-marker trace duration.")
+    if not marker_times_min:
+        raise ValueError(f"No markers named '{marker_name}' are available.")
+
+    time_s = processed["original_time_s"].to_numpy(float)
+    signal = processed[signal_column].to_numpy(float)
+    valid_source = np.isfinite(time_s) & np.isfinite(signal)
+    time_s, signal = time_s[valid_source], signal[valid_source]
+    order = np.argsort(time_s)
+    time_s, signal = time_s[order], signal[order]
+    unique = np.r_[True, np.diff(time_s) > 0]
+    time_s, signal = time_s[unique], signal[unique]
+    if len(time_s) < 3:
+        raise ValueError("Fewer than three finite corrected-signal samples are available for event analysis.")
+    positive_dt = np.diff(time_s)
+    positive_dt = positive_dt[positive_dt > 0]
+    sample_interval = float(np.median(positive_dt))
+    if not np.isfinite(sample_interval) or sample_interval <= 0:
+        raise ValueError("The signal sampling interval could not be determined.")
+
+    pre_point_count = max(2, int(round(pre_seconds / sample_interval)) + 1)
+    post_point_count = max(2, int(round(post_seconds / sample_interval)) + 1)
+    relative_time = np.concatenate((
+        np.linspace(-float(pre_seconds), 0.0, pre_point_count)[:-1],
+        np.linspace(0.0, float(post_seconds), post_point_count),
+    ))
+    baseline_mask = (relative_time >= -float(baseline_seconds)) & (relative_time < 0)
+    if baseline_mask.sum() < 2:
+        raise ValueError(
+            "The event baseline contains fewer than two samples. Increase the baseline duration "
+            "or use data with a higher sampling rate."
+        )
+
+    trial_rows: list[pd.DataFrame] = []
+    excluded: list[dict[str, Any]] = []
+    trial_arrays: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
+    for event_index, marker_time_min in enumerate(marker_times_min, start=1):
+        marker_time_s = float(marker_time_min) * 60.0
+        absolute_time = marker_time_s + relative_time
+        if absolute_time[0] < time_s[0] or absolute_time[-1] > time_s[-1]:
+            excluded.append({
+                "event_index": event_index,
+                "marker_time_min": float(marker_time_min),
+                "reason": "the requested trace window extends outside the corrected recording",
+            })
+            continue
+        trace = np.interp(absolute_time, time_s, signal)
+        baseline_values = trace[baseline_mask]
+        f0 = float(np.mean(baseline_values))
+        if not np.isfinite(f0) or np.isclose(f0, 0):
+            excluded.append({
+                "event_index": event_index,
+                "marker_time_min": float(marker_time_min),
+                "reason": "the trial baseline mean is zero or invalid",
+            })
+            continue
+        dff = 100.0 * (trace - f0) / f0
+        baseline_dff = dff[baseline_mask]
+        baseline_center = float(np.mean(baseline_dff))
+        baseline_sd = float(np.std(baseline_dff, ddof=1))
+        if not np.isfinite(baseline_sd) or baseline_sd <= np.finfo(float).eps:
+            excluded.append({
+                "event_index": event_index,
+                "marker_time_min": float(marker_time_min),
+                "reason": "the trial baseline standard deviation is zero or invalid",
+            })
+            continue
+        zscore = (dff - baseline_center) / baseline_sd
+        trial_number = len(trial_rows) + 1
+        trial_rows.append(pd.DataFrame({
+            "trial": trial_number,
+            "source_event_index": event_index,
+            "marker_name": marker_name,
+            "marker_time_min": float(marker_time_min),
+            "relative_time_s": relative_time,
+            "corrected_signal": trace,
+            "dff_percent": dff,
+            "zscore": zscore,
+            "event_baseline": baseline_mask.astype(int),
+            "f0": f0,
+            "baseline_dff_sd": baseline_sd,
+        }))
+        trial_arrays.append((trace, dff, zscore))
+
+    if not trial_rows:
+        reasons = "; ".join(item["reason"] for item in excluded[:3])
+        raise ValueError(f"No complete event trials could be analyzed. {reasons}")
+
+    trials = pd.concat(trial_rows, ignore_index=True)
+    corrected_stack = np.vstack([item[0] for item in trial_arrays])
+    dff_stack = np.vstack([item[1] for item in trial_arrays])
+    zscore_stack = np.vstack([item[2] for item in trial_arrays])
+    trial_count = len(trial_arrays)
+
+    def mean_and_sem(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        mean = np.mean(values, axis=0)
+        if values.shape[0] < 2:
+            return mean, np.full(values.shape[1], np.nan)
+        return mean, np.std(values, axis=0, ddof=1) / np.sqrt(values.shape[0])
+
+    corrected_mean, corrected_sem = mean_and_sem(corrected_stack)
+    dff_mean, dff_sem = mean_and_sem(dff_stack)
+    zscore_mean, zscore_sem = mean_and_sem(zscore_stack)
+    average = pd.DataFrame({
+        "relative_time_s": relative_time,
+        "n_trials": trial_count,
+        "corrected_signal_mean": corrected_mean,
+        "corrected_signal_sem": corrected_sem,
+        "dff_percent_mean": dff_mean,
+        "dff_percent_sem": dff_sem,
+        "zscore_mean": zscore_mean,
+        "zscore_sem": zscore_sem,
+        "event_baseline": baseline_mask.astype(int),
+    })
+    details = {
+        "marker_name": marker_name,
+        "requested_events": len(marker_times_min),
+        "included_trials": trial_count,
+        "excluded_events": excluded,
+        "pre_seconds": float(pre_seconds),
+        "post_seconds": float(post_seconds),
+        "baseline_seconds": float(baseline_seconds),
+        "sample_interval_seconds": sample_interval,
+        "signal_column": signal_column,
+        "normalization": "each trial uses its own pre-marker baseline",
+    }
+    return trials, average, details
