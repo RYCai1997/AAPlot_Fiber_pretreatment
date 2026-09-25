@@ -466,6 +466,10 @@ class PretreatmentApp:
         self.analysis_wavelength_var = tk.StringVar(value="470")
         self.reference_wavelength_var = tk.StringVar(value="410")
         self.event_marker_var = tk.StringVar(value="")
+        self.event_marker_candidates: list[dict[str, Any]] = []
+        self.event_marker_list_name: str | None = None
+        self.event_signal_candidates: list[dict[str, str]] = []
+        self.event_signal_status_var = tk.StringVar(value="Apply correction, then select event signals.")
         self.export_annotation_var = tk.StringVar(value="none")
         self.export_marker_var = tk.StringVar(value="")
         self.export_vars = {
@@ -636,18 +640,73 @@ class PretreatmentApp:
 
         row = 0
         row = self.section(event_tab, row, "Marker-Aligned Trial Analysis")
+        ttk.Label(event_tab, text="Signals to Analyze").grid(row=row, column=0, sticky="nw")
+        event_signal_frame = ttk.Frame(event_tab)
+        event_signal_frame.grid(row=row, column=1, sticky="nsew"); row += 1
+        event_signal_frame.columnconfigure(0, weight=1)
+        event_signal_frame.rowconfigure(0, weight=1)
+        self.event_signal_list = tk.Listbox(
+            event_signal_frame, height=4, selectmode=tk.EXTENDED, exportselection=False,
+            relief="flat", highlightthickness=1,
+        )
+        self.event_signal_list.grid(row=0, column=0, sticky="nsew")
+        event_signal_scroll = ttk.Scrollbar(
+            event_signal_frame, orient=tk.VERTICAL, command=self.event_signal_list.yview,
+        )
+        event_signal_scroll.grid(row=0, column=1, sticky="ns")
+        self.event_signal_list.configure(yscrollcommand=event_signal_scroll.set)
+        self.event_signal_list.bind("<<ListboxSelect>>", self.event_signal_selection_changed)
+        event_signal_buttons = ttk.Frame(event_tab)
+        event_signal_buttons.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(2, 1)); row += 1
+        ttk.Button(event_signal_buttons, text="Select All Signals",
+                   command=self.select_all_event_signals).pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 1),
+        )
+        ttk.Button(event_signal_buttons, text="Clear Signals",
+                   command=self.clear_event_signal_selection).pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=(1, 0),
+        )
+        ttk.Label(event_tab, textvariable=self.event_signal_status_var,
+                  wraplength=380, style="Hint.TLabel").grid(
+            row=row, column=0, columnspan=2, sticky="w", pady=(0, 5),
+        ); row += 1
         ttk.Label(event_tab, text="Marker Name").grid(row=row, column=0, sticky="w")
         self.event_marker_box = ttk.Combobox(
             event_tab, textvariable=self.event_marker_var, state="readonly", width=20,
         )
         self.event_marker_box.grid(row=row, column=1, sticky="ew"); row += 1
+        self.event_marker_box.bind("<<ComboboxSelected>>", self.event_marker_changed)
+        ttk.Label(event_tab, text="Markers to Analyze").grid(row=row, column=0, sticky="nw")
+        event_marker_frame = ttk.Frame(event_tab)
+        event_marker_frame.grid(row=row, column=1, sticky="nsew"); row += 1
+        event_marker_frame.columnconfigure(0, weight=1)
+        event_marker_frame.rowconfigure(0, weight=1)
+        self.event_marker_list = tk.Listbox(
+            event_marker_frame, height=7, selectmode=tk.EXTENDED, exportselection=False,
+            relief="flat", highlightthickness=1,
+        )
+        self.event_marker_list.grid(row=0, column=0, sticky="nsew")
+        event_marker_scroll = ttk.Scrollbar(
+            event_marker_frame, orient=tk.VERTICAL, command=self.event_marker_list.yview,
+        )
+        event_marker_scroll.grid(row=0, column=1, sticky="ns")
+        self.event_marker_list.configure(yscrollcommand=event_marker_scroll.set)
+        self.event_marker_list.bind("<<ListboxSelect>>", self.event_marker_selection_changed)
+        event_marker_buttons = ttk.Frame(event_tab)
+        event_marker_buttons.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(2, 5)); row += 1
+        ttk.Button(event_marker_buttons, text="Select All", command=self.select_all_event_markers).pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 1),
+        )
+        ttk.Button(event_marker_buttons, text="Clear Selection", command=self.clear_event_marker_selection).pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=(1, 0),
+        )
         row = self.entry(event_tab, row, "Trace Before Marker (s)", "event_pre_seconds")
         row = self.entry(event_tab, row, "Trace After Marker (s)", "event_post_seconds")
         row = self.entry(event_tab, row, "Baseline Before Marker (s)", "event_baseline_seconds")
         ttk.Label(
             event_tab,
-            text="All markers with the selected name are treated as repeated trials. "
-                 "Each trial is normalized using its own interval immediately before time 0.",
+            text="Select any number of markers with Ctrl/Shift-click (all are selected by default). "
+                 "Each selected trial is normalized using its own interval immediately before time 0.",
             wraplength=380, style="Hint.TLabel",
         ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(5, 8)); row += 1
         ttk.Button(
@@ -788,6 +847,14 @@ class PretreatmentApp:
         self.analysis_wavelength_var.set("470")
         self.reference_wavelength_var.set("410")
         self.event_marker_var.set("")
+        self.event_marker_candidates = []
+        self.event_marker_list_name = None
+        if hasattr(self, "event_marker_list"):
+            self.event_marker_list.delete(0, self.tk.END)
+        self.event_signal_candidates = []
+        self.event_signal_status_var.set("Apply correction, then select event signals.")
+        if hasattr(self, "event_signal_list"):
+            self.event_signal_list.delete(0, self.tk.END)
         self.export_annotation_var.set("none")
         self.export_marker_var.set("")
         export_defaults = {
@@ -1046,6 +1113,7 @@ class PretreatmentApp:
             first = f"Raw {analysis}"
             self.line_width_selector_var.set(first)
             self.line_width_selection_changed()
+        self.refresh_event_signal_list(prefer_default=True)
 
     def analysis_selection_changed(self) -> None:
         analysis = self.analysis_wavelength_var.get()
@@ -1057,6 +1125,7 @@ class PretreatmentApp:
             self.reference_wavelength_var.set("410" if "410" in references else "None")
         has_reference = self.reference_wavelength_var.get() != "None"
         self.combine_box.configure(state="readonly" if has_reference else "disabled")
+        self.refresh_event_signal_list(prefer_default=True)
         if self.event_trials is not None:
             self.clear_event_analysis("Analysis wavelength changed. Recalculate the event analysis.")
         if self.processed is not None:
@@ -1207,6 +1276,7 @@ class PretreatmentApp:
             self.processed, self.details = process_data(self.data, config)
             self.normalized = False
             self.clear_event_analysis("Correction updated. Select a marker name and calculate event analysis.")
+            self.refresh_event_signal_list()
             self.display_cache.clear()
             self.rebuild_axes(); self.draw_processed()
             self.vars["status"].set(
@@ -1848,12 +1918,198 @@ class PretreatmentApp:
         if not choices and self.zero_enabled_var.get() and self.zero_mode_var.get() == "marker":
             self.zero_mode_var.set("time")
         marker_names = sorted({str(marker["name"]) for marker in self.markers})
+        previous_event_name = self.event_marker_var.get()
         if getattr(self, "event_marker_box", None) is not None:
             self.event_marker_box.configure(values=marker_names)
         if marker_names and self.event_marker_var.get() not in marker_names:
             self.event_marker_var.set(marker_names[0])
         elif not marker_names:
             self.event_marker_var.set("")
+        self.refresh_event_marker_list(select_all=self.event_marker_var.get() != previous_event_name)
+
+    def available_event_signals(self) -> list[dict[str, str]]:
+        """Describe corrected wavelength traces and the currently configured ratio."""
+        choices = [
+            {
+                "key": f"wavelength:{wavelength}",
+                "label": f"{wavelength} (corrected)",
+                "kind": "wavelength",
+                "column": f"corrected_{wavelength}",
+            }
+            for wavelength in self.available_wavelengths
+        ]
+        analysis = self.analysis_wavelength_var.get()
+        reference = self.reference_wavelength_var.get()
+        if (analysis in self.available_wavelengths
+                and reference in self.available_wavelengths
+                and analysis != reference):
+            choices.append({
+                "key": f"ratio:{analysis}/{reference}",
+                "label": f"Ratio {analysis}/{reference}",
+                "kind": "ratio",
+                "numerator": analysis,
+                "denominator": reference,
+            })
+        return choices
+
+    def selected_event_signals(self) -> list[dict[str, str]]:
+        if not hasattr(self, "event_signal_list"):
+            return []
+        return [
+            self.event_signal_candidates[index]
+            for index in self.event_signal_list.curselection()
+            if 0 <= index < len(self.event_signal_candidates)
+        ]
+
+    def refresh_event_signal_list(self, prefer_default: bool = False) -> None:
+        if not hasattr(self, "event_signal_list"):
+            return
+        selected_keys = {signal["key"] for signal in self.selected_event_signals()}
+        had_candidates = bool(self.event_signal_candidates)
+        self.event_signal_candidates = self.available_event_signals()
+        self.event_signal_list.delete(0, self.tk.END)
+        for signal in self.event_signal_candidates:
+            self.event_signal_list.insert(self.tk.END, signal["label"])
+
+        if self.event_signal_candidates:
+            if prefer_default or not had_candidates:
+                analysis = self.analysis_wavelength_var.get()
+                reference = self.reference_wavelength_var.get()
+                default_key = (f"ratio:{analysis}/{reference}"
+                               if reference not in {"", "None"}
+                               else f"wavelength:{analysis}")
+                default_index = next(
+                    (index for index, signal in enumerate(self.event_signal_candidates)
+                     if signal["key"] == default_key),
+                    0,
+                )
+                self.event_signal_list.selection_set(default_index)
+            else:
+                for index, signal in enumerate(self.event_signal_candidates):
+                    if signal["key"] in selected_keys:
+                        self.event_signal_list.selection_set(index)
+        self.update_event_signal_selection_status()
+
+    def update_event_signal_selection_status(self) -> None:
+        selected = self.selected_event_signals()
+        total = len(self.event_signal_candidates)
+        if selected:
+            labels = ", ".join(signal["label"] for signal in selected)
+            self.event_signal_status_var.set(f"Selected {len(selected)} of {total}: {labels}")
+        elif total:
+            self.event_signal_status_var.set(f"Selected 0 of {total} signals.")
+        else:
+            self.event_signal_status_var.set("No corrected wavelength or ratio is available.")
+
+    def event_signal_selection_changed(self, _event: Any = None) -> None:
+        event_plot_was_active = self.event_view_active
+        if self.event_details is not None:
+            self.clear_event_analysis()
+        self.update_event_signal_selection_status()
+        if event_plot_was_active and self.processed is not None:
+            self.draw_processed()
+
+    def select_all_event_signals(self) -> None:
+        if self.event_signal_candidates:
+            self.event_signal_list.selection_set(0, self.tk.END)
+        self.event_signal_selection_changed()
+
+    def clear_event_signal_selection(self) -> None:
+        self.event_signal_list.selection_clear(0, self.tk.END)
+        self.event_signal_selection_changed()
+
+    def event_signal_values(self, signal: dict[str, str]) -> np.ndarray:
+        if self.processed is None:
+            raise ValueError("Apply correction before calculating event analysis.")
+        if signal["kind"] == "wavelength":
+            column = signal["column"]
+            if column not in self.processed:
+                raise ValueError(f"{signal['label']} is unavailable in the corrected data.")
+            return self.display_values(column)
+        numerator_column = f"corrected_{signal['numerator']}"
+        denominator_column = f"corrected_{signal['denominator']}"
+        if numerator_column not in self.processed or denominator_column not in self.processed:
+            raise ValueError(f"{signal['label']} is unavailable in the corrected data.")
+        numerator = self.processed[numerator_column].to_numpy(float)
+        denominator = self.processed[denominator_column].to_numpy(float)
+        ratio = np.full(len(self.processed), np.nan, dtype=float)
+        valid = np.isfinite(numerator) & np.isfinite(denominator) & ~np.isclose(denominator, 0)
+        np.divide(numerator, denominator, out=ratio, where=valid)
+        return self.smooth_array(ratio)
+
+    def selected_event_markers(self) -> list[dict[str, Any]]:
+        """Return only the event markers explicitly selected in the event-analysis list."""
+        if not hasattr(self, "event_marker_list"):
+            return []
+        return [
+            self.event_marker_candidates[index]
+            for index in self.event_marker_list.curselection()
+            if 0 <= index < len(self.event_marker_candidates)
+        ]
+
+    def refresh_event_marker_list(self, select_all: bool = False) -> None:
+        if not hasattr(self, "event_marker_list"):
+            return
+        marker_name = self.event_marker_var.get().strip()
+        same_name = marker_name == self.event_marker_list_name
+        selected_ids = ({str(marker["id"]) for marker in self.selected_event_markers()}
+                        if same_name else set())
+        self.event_marker_candidates = [
+            marker for marker in self.sorted_markers() if str(marker["name"]) == marker_name
+        ]
+        self.event_marker_list.delete(0, self.tk.END)
+        for index, marker in enumerate(self.event_marker_candidates, start=1):
+            source = "Original" if marker["source"] == "original" else "Manual"
+            self.event_marker_list.insert(
+                self.tk.END, f"{index}. {marker['time_min']:.5f} min  [{source}]",
+            )
+        self.event_marker_list_name = marker_name
+        if self.event_marker_candidates:
+            if select_all or not same_name:
+                self.event_marker_list.selection_set(0, self.tk.END)
+            else:
+                for index, marker in enumerate(self.event_marker_candidates):
+                    if str(marker["id"]) in selected_ids:
+                        self.event_marker_list.selection_set(index)
+        self.update_event_marker_selection_status()
+
+    def update_event_marker_selection_status(self) -> None:
+        total = len(self.event_marker_candidates)
+        selected = (len(self.event_marker_list.curselection())
+                    if hasattr(self, "event_marker_list") else 0)
+        marker_name = self.event_marker_var.get().strip()
+        if total:
+            self.vars["event_status"].set(
+                f"Selected {selected} of {total} '{marker_name}' marker(s) for event analysis."
+            )
+        elif marker_name:
+            self.vars["event_status"].set(f"No markers named '{marker_name}' are available.")
+        else:
+            self.vars["event_status"].set("Select a marker name after loading data.")
+
+    def event_marker_changed(self, _event: Any = None) -> None:
+        event_plot_was_active = self.event_view_active
+        self.clear_event_analysis()
+        self.refresh_event_marker_list(select_all=True)
+        if event_plot_was_active and self.processed is not None:
+            self.draw_processed()
+
+    def event_marker_selection_changed(self, _event: Any = None) -> None:
+        event_plot_was_active = self.event_view_active
+        if self.event_details is not None:
+            self.clear_event_analysis()
+        self.update_event_marker_selection_status()
+        if event_plot_was_active and self.processed is not None:
+            self.draw_processed()
+
+    def select_all_event_markers(self) -> None:
+        if self.event_marker_candidates:
+            self.event_marker_list.selection_set(0, self.tk.END)
+        self.event_marker_selection_changed()
+
+    def clear_event_marker_selection(self) -> None:
+        self.event_marker_list.selection_clear(0, self.tk.END)
+        self.event_marker_selection_changed()
 
     def add_marker(self) -> None:
         try:
@@ -1922,10 +2178,18 @@ class PretreatmentApp:
         value = self.number("zero_time")
         return value, {"enabled": True, "mode": "time", "original_time_min": value}
 
-    def current_event_settings(self) -> tuple[str, float, float, float]:
+    def current_event_settings(
+        self,
+    ) -> tuple[str, float, float, float, tuple[str, ...], tuple[str, ...]]:
         marker_name = self.event_marker_var.get().strip()
         if not marker_name:
             raise ValueError("Select a marker name for event analysis.")
+        selected_markers = self.selected_event_markers()
+        if not selected_markers:
+            raise ValueError("Select at least one marker for event analysis.")
+        selected_signals = self.selected_event_signals()
+        if not selected_signals:
+            raise ValueError("Select at least one signal for event analysis.")
         pre_seconds = self.number("event_pre_seconds")
         post_seconds = self.number("event_post_seconds")
         baseline_seconds = self.number("event_baseline_seconds")
@@ -1933,7 +2197,10 @@ class PretreatmentApp:
             raise ValueError("Event trace and baseline durations must be greater than 0 seconds.")
         if baseline_seconds > pre_seconds:
             raise ValueError("The event baseline cannot be longer than the pre-marker trace interval.")
-        return marker_name, pre_seconds, post_seconds, baseline_seconds
+        selected_ids = tuple(str(marker["id"]) for marker in selected_markers)
+        selected_signal_keys = tuple(signal["key"] for signal in selected_signals)
+        return (marker_name, pre_seconds, post_seconds, baseline_seconds,
+                selected_ids, selected_signal_keys)
 
     def calculate_event_analysis(self) -> None:
         from tkinter import messagebox
@@ -1941,41 +2208,168 @@ class PretreatmentApp:
             messagebox.showinfo("Correction Required", "Complete fitting and apply correction first.")
             return
         try:
-            marker_name, pre_seconds, post_seconds, baseline_seconds = self.current_event_settings()
-            marker_times = [
-                float(marker["time_min"]) for marker in self.sorted_markers()
-                if str(marker["name"]) == marker_name
-            ]
-            event_source = self.processed.copy()
-            event_source["analysis_trace"] = self.display_values("analysis_trace")
-            trials, average, event_details = calculate_event_locked_traces(
-                event_source,
-                marker_times,
-                marker_name,
-                pre_seconds,
-                post_seconds,
-                baseline_seconds,
-            )
-            event_details["smoothing_seconds"] = self.smoothing_seconds()
-            event_details["source_channel"] = self.source_channel_var.get()
-            event_details["corrected_trace_label"] = (
-                self.details.get("combined_label")
-                or f"Corrected {self.details.get('analysis_wavelength', self.analysis_wavelength_var.get())}"
-            )
-            self.event_trials = trials
-            self.event_average = average
+            (marker_name, pre_seconds, post_seconds, baseline_seconds,
+             selected_ids, selected_signal_keys) = self.current_event_settings()
+            selected_markers = self.selected_event_markers()
+            selected_signals = self.selected_event_signals()
+            marker_times = [float(marker["time_min"]) for marker in selected_markers]
+            trial_frames: list[pd.DataFrame] = []
+            average_frames: list[pd.DataFrame] = []
+            signal_details: dict[str, Any] = {}
+            excluded_events: list[dict[str, Any]] = []
+            included_by_signal: dict[str, int] = {}
+            for signal in selected_signals:
+                event_source = self.processed[["original_time_s"]].copy()
+                event_source["event_signal"] = self.event_signal_values(signal)
+                trials, average, details = calculate_event_locked_traces(
+                    event_source,
+                    marker_times,
+                    marker_name,
+                    pre_seconds,
+                    post_seconds,
+                    baseline_seconds,
+                    signal_column="event_signal",
+                )
+                trials.insert(0, "event_signal_label", signal["label"])
+                trials.insert(0, "event_signal_key", signal["key"])
+                average.insert(0, "event_signal_label", signal["label"])
+                average.insert(0, "event_signal_key", signal["key"])
+                trial_frames.append(trials)
+                average_frames.append(average)
+                included_by_signal[signal["key"]] = int(details["included_trials"])
+                for excluded in details["excluded_events"]:
+                    excluded_events.append({
+                        "event_signal_key": signal["key"],
+                        "event_signal_label": signal["label"],
+                        **excluded,
+                    })
+                signal_details[signal["key"]] = {
+                    "label": signal["label"],
+                    "kind": signal["kind"],
+                    **{key: value for key, value in signal.items()
+                       if key not in {"key", "label", "kind"}},
+                    **details,
+                }
+
+            event_details = {
+                "marker_name": marker_name,
+                "requested_events": len(marker_times),
+                "included_trials": int(sum(included_by_signal.values())),
+                "included_trials_per_signal": included_by_signal,
+                "excluded_events": excluded_events,
+                "pre_seconds": float(pre_seconds),
+                "post_seconds": float(post_seconds),
+                "baseline_seconds": float(baseline_seconds),
+                "smoothing_seconds": self.smoothing_seconds(),
+                "source_channel": self.source_channel_var.get(),
+                "available_events_with_marker_name": len(self.event_marker_candidates),
+                "selected_marker_ids": list(selected_ids),
+                "selected_marker_times_min": marker_times,
+                "selected_signal_keys": list(selected_signal_keys),
+                "selected_signals": [dict(signal) for signal in selected_signals],
+                "signal_details": signal_details,
+                "normalization": "each signal trial uses its own pre-marker baseline",
+            }
+            self.event_trials = pd.concat(trial_frames, ignore_index=True)
+            self.event_average = pd.concat(average_frames, ignore_index=True)
             self.event_details = event_details
             self.event_view_active = True
             self.draw_event_analysis()
             excluded_count = len(event_details["excluded_events"])
             self.vars["event_status"].set(
-                f"Calculated {event_details['included_trials']} trial(s) for '{marker_name}'"
-                + (f"; excluded {excluded_count} incomplete/invalid event(s)." if excluded_count else ".")
+                f"Calculated {len(marker_times)} selected marker(s) × {len(selected_signals)} signal(s) "
+                f"for '{marker_name}' ({event_details['included_trials']} included traces)"
+                + (f"; excluded {excluded_count} incomplete/invalid trace(s)." if excluded_count else ".")
             )
             self.vars["status"].set(self.vars["event_status"].get())
         except Exception as exc:
             messagebox.showerror("Event Analysis Failed", str(exc))
             self.vars["event_status"].set(f"Event analysis failed: {exc}")
+
+    def plot_event_analysis_axes(self, axes: list[Any], interactive: bool) -> None:
+        """Draw one or several event signals on the shared four-panel layout."""
+        if self.event_trials is None or self.event_average is None or self.event_details is None:
+            return
+        trials, average = self.event_trials, self.event_average
+        signals = self.event_details.get("selected_signals", [])
+        signal_palette = ["#4C78A8", "#F58518", "#54A24B", "#E45756",
+                          "#72B7B2", "#B279A2", "#9D755D", "#7B4B94"]
+        trial_palette = ["#4C78A8", "#F58518", "#54A24B", "#E45756", "#72B7B2",
+                         "#B279A2", "#FF9DA6", "#9D755D", "#BAB0AC", "#7B4B94"]
+        multiple_signals = len(signals) > 1
+
+        for signal_index, signal in enumerate(signals):
+            signal_key, signal_label = signal["key"], signal["label"]
+            color = signal_palette[signal_index % len(signal_palette)]
+            signal_trials = trials.loc[trials["event_signal_key"] == signal_key]
+            grouped_trials = list(signal_trials.groupby("trial", sort=True))
+            for trial_index, (trial_number, trial) in enumerate(grouped_trials):
+                trial_time = trial["relative_time_s"].to_numpy(float)
+                trial_color = color if multiple_signals else trial_palette[trial_index % len(trial_palette)]
+                trial_label = (f"{signal_label} (n={len(grouped_trials)})"
+                               if multiple_signals and trial_index == 0
+                               else (None if multiple_signals else f"Trial {trial_number}"))
+                axes[0].plot(
+                    trial_time, trial["dff_percent"].to_numpy(float), color=trial_color,
+                    lw=self.line_width("dff"), alpha=0.38 if multiple_signals else 0.78,
+                    label=trial_label, gid="dff" if interactive else None,
+                )
+                axes[2].plot(
+                    trial_time, trial["zscore"].to_numpy(float), color=trial_color,
+                    lw=self.line_width("zscore"), alpha=0.38 if multiple_signals else 0.78,
+                    label=trial_label, gid="zscore" if interactive else None,
+                )
+
+            signal_average = average.loc[average["event_signal_key"] == signal_key]
+            relative_time = signal_average["relative_time_s"].to_numpy(float)
+            dff_mean = signal_average["dff_percent_mean"].to_numpy(float)
+            dff_sem = signal_average["dff_percent_sem"].to_numpy(float)
+            zscore_mean = signal_average["zscore_mean"].to_numpy(float)
+            zscore_sem = signal_average["zscore_sem"].to_numpy(float)
+            mean_color = color if multiple_signals else "#5B2C83"
+            mean_label = signal_label if multiple_signals else "Mean"
+            axes[1].plot(relative_time, dff_mean, color=mean_color, lw=2.0,
+                         label=mean_label, gid="dff" if interactive else None)
+            axes[3].plot(relative_time, zscore_mean, color=mean_color, lw=2.0,
+                         label=mean_label, gid="zscore" if interactive else None)
+            if np.any(np.isfinite(dff_sem)):
+                axes[1].fill_between(relative_time, dff_mean - dff_sem, dff_mean + dff_sem,
+                                     color=mean_color, alpha=0.20,
+                                     label="SEM" if not multiple_signals else None)
+            if np.any(np.isfinite(zscore_sem)):
+                axes[3].fill_between(relative_time, zscore_mean - zscore_sem, zscore_mean + zscore_sem,
+                                     color=mean_color, alpha=0.20,
+                                     label="SEM" if not multiple_signals else None)
+
+        labels = ["Trial dF/F0 (%)", "Average dF/F0 (%)", "Trial Z-score", "Average Z-score"]
+        baseline_start = -float(self.event_details["baseline_seconds"])
+        for ax, label in zip(axes, labels):
+            ax.axvspan(baseline_start, 0, color="#B8B8B8", alpha=0.18)
+            ax.axvline(0, color="#C43C39", ls="--", lw=1.0)
+            ax.axhline(0, color="#777777", lw=0.7, alpha=0.6)
+            ax.set_ylabel(label)
+            if interactive:
+                self.style_axis(ax)
+            else:
+                ax.grid(False)
+                ax.spines[["top", "right"]].set_visible(False)
+        for axis_index in (0, 1, 3):
+            handles, legend_labels = axes[axis_index].get_legend_handles_labels()
+            if handles:
+                axes[axis_index].legend(frameon=False, ncol=min(4, len(handles)),
+                                        fontsize=7 if axis_index == 0 else 8,
+                                        loc="upper right")
+        axes[-1].set_xlabel("Time from marker (s)")
+        axes[-1].set_xlim(-float(self.event_details["pre_seconds"]),
+                          float(self.event_details["post_seconds"]))
+
+    def event_analysis_title(self, suffix: str) -> str:
+        assert self.event_details is not None
+        return (
+            f"Event analysis | {self.event_details['marker_name']} | "
+            f"markers={self.event_details['requested_events']} | "
+            f"signals={len(self.event_details.get('selected_signal_keys', []))} | {suffix}"
+        )
 
     def draw_event_analysis(self) -> None:
         if self.event_trials is None or self.event_average is None or self.event_details is None:
@@ -1988,53 +2382,8 @@ class PretreatmentApp:
         self.figure.clear()
         self.axes = self.figure.subplots(4, 1, sharex=True, squeeze=False).ravel().tolist()
         self.axis_keys = ["event_dff_trials", "event_dff_average", "event_zscore_trials", "event_zscore_average"]
-        trials, average = self.event_trials, self.event_average
-        relative_time = average["relative_time_s"].to_numpy(float)
-        palette = ["#4C78A8", "#F58518", "#54A24B", "#E45756", "#72B7B2",
-                   "#B279A2", "#FF9DA6", "#9D755D", "#BAB0AC", "#7B4B94"]
-        grouped = list(trials.groupby("trial", sort=True))
-        for index, (trial_number, trial) in enumerate(grouped):
-            color = palette[index % len(palette)]
-            trial_time = trial["relative_time_s"].to_numpy(float)
-            self.axes[0].plot(
-                trial_time, trial["dff_percent"].to_numpy(float), color=color,
-                lw=self.line_width("dff"), alpha=0.78, label=f"Trial {trial_number}", gid="dff",
-            )
-            self.axes[2].plot(
-                trial_time, trial["zscore"].to_numpy(float), color=color,
-                lw=self.line_width("zscore"), alpha=0.78, label=f"Trial {trial_number}", gid="zscore",
-            )
-        dff_mean = average["dff_percent_mean"].to_numpy(float)
-        dff_sem = average["dff_percent_sem"].to_numpy(float)
-        zscore_mean = average["zscore_mean"].to_numpy(float)
-        zscore_sem = average["zscore_sem"].to_numpy(float)
-        self.axes[1].plot(relative_time, dff_mean, color="#5B2C83", lw=2.0, label="Mean", gid="dff")
-        self.axes[3].plot(relative_time, zscore_mean, color="#5B2C83", lw=2.0, label="Mean", gid="zscore")
-        if np.any(np.isfinite(dff_sem)):
-            self.axes[1].fill_between(relative_time, dff_mean - dff_sem, dff_mean + dff_sem,
-                                      color="#9B7CB6", alpha=0.28, label="SEM")
-        if np.any(np.isfinite(zscore_sem)):
-            self.axes[3].fill_between(relative_time, zscore_mean - zscore_sem, zscore_mean + zscore_sem,
-                                      color="#9B7CB6", alpha=0.28, label="SEM")
-        labels = ["Trial dF/F0 (%)", "Average dF/F0 (%)", "Trial Z-score", "Average Z-score"]
-        baseline_start = -float(self.event_details["baseline_seconds"])
-        for ax, label in zip(self.axes, labels):
-            ax.axvspan(baseline_start, 0, color="#B8B8B8", alpha=0.18)
-            ax.axvline(0, color="#C43C39", ls="--", lw=1.0)
-            ax.axhline(0, color="#777777", lw=0.7, alpha=0.6)
-            ax.set_ylabel(label)
-            self.style_axis(ax)
-        self.axes[0].legend(frameon=False, ncol=min(5, len(grouped)), fontsize=7, loc="upper right")
-        self.axes[1].legend(frameon=False, fontsize=8, loc="upper right")
-        self.axes[3].legend(frameon=False, fontsize=8, loc="upper right")
-        self.axes[-1].set_xlabel("Time from marker (s)")
-        self.axes[-1].set_xlim(-float(self.event_details["pre_seconds"]),
-                               float(self.event_details["post_seconds"]))
-        self.figure.suptitle(
-            f"Event analysis | {self.event_details['marker_name']} | "
-            f"n={self.event_details['included_trials']} | shaded area=baseline",
-            fontsize=11,
-        )
+        self.plot_event_analysis_axes(self.axes, interactive=True)
+        self.figure.suptitle(self.event_analysis_title("shaded area=baseline"), fontsize=11)
         self.refresh_axis_scale_controls()
         self.capture_initial_view()
         self.initialize_hover_artists()
@@ -2138,56 +2487,14 @@ class PretreatmentApp:
             figure.savefig(path, **save_args)
 
     def save_event_analysis_figure(self, path: Path) -> None:
-        """Export individual event trials and their mean ± SEM as four aligned panels."""
+        """Export selected event signals, individual trials and mean ± SEM."""
         from matplotlib.figure import Figure
         if self.event_trials is None or self.event_average is None or self.event_details is None:
             raise ValueError("Calculate event analysis before exporting event plots.")
         figure = Figure(figsize=(12, 10), dpi=100, constrained_layout=True)
         axes = figure.subplots(4, 1, sharex=True, squeeze=False).ravel().tolist()
-        trials, average = self.event_trials, self.event_average
-        palette = ["#4C78A8", "#F58518", "#54A24B", "#E45756", "#72B7B2",
-                   "#B279A2", "#FF9DA6", "#9D755D", "#BAB0AC", "#7B4B94"]
-        grouped = list(trials.groupby("trial", sort=True))
-        for index, (trial_number, trial) in enumerate(grouped):
-            color = palette[index % len(palette)]
-            time_s = trial["relative_time_s"].to_numpy(float)
-            axes[0].plot(time_s, trial["dff_percent"].to_numpy(float), color=color,
-                         lw=self.line_width("dff"), alpha=0.78, label=f"Trial {trial_number}")
-            axes[2].plot(time_s, trial["zscore"].to_numpy(float), color=color,
-                         lw=self.line_width("zscore"), alpha=0.78, label=f"Trial {trial_number}")
-        relative_time = average["relative_time_s"].to_numpy(float)
-        dff_mean = average["dff_percent_mean"].to_numpy(float)
-        dff_sem = average["dff_percent_sem"].to_numpy(float)
-        zscore_mean = average["zscore_mean"].to_numpy(float)
-        zscore_sem = average["zscore_sem"].to_numpy(float)
-        axes[1].plot(relative_time, dff_mean, color="#5B2C83", lw=2.0, label="Mean")
-        axes[3].plot(relative_time, zscore_mean, color="#5B2C83", lw=2.0, label="Mean")
-        if np.any(np.isfinite(dff_sem)):
-            axes[1].fill_between(relative_time, dff_mean - dff_sem, dff_mean + dff_sem,
-                                 color="#9B7CB6", alpha=0.28, label="SEM")
-        if np.any(np.isfinite(zscore_sem)):
-            axes[3].fill_between(relative_time, zscore_mean - zscore_sem, zscore_mean + zscore_sem,
-                                 color="#9B7CB6", alpha=0.28, label="SEM")
-        labels = ["Trial dF/F0 (%)", "Average dF/F0 (%)", "Trial Z-score", "Average Z-score"]
-        baseline_start = -float(self.event_details["baseline_seconds"])
-        for ax, label in zip(axes, labels):
-            ax.axvspan(baseline_start, 0, color="#B8B8B8", alpha=0.18)
-            ax.axvline(0, color="#C43C39", ls="--", lw=1.0)
-            ax.axhline(0, color="#777777", lw=0.7, alpha=0.6)
-            ax.set_ylabel(label)
-            ax.grid(False)
-            ax.spines[["top", "right"]].set_visible(False)
-        axes[0].legend(frameon=False, ncol=min(5, len(grouped)), fontsize=7, loc="upper right")
-        axes[1].legend(frameon=False, fontsize=8, loc="upper right")
-        axes[3].legend(frameon=False, fontsize=8, loc="upper right")
-        axes[-1].set_xlabel("Time from marker (s)")
-        axes[-1].set_xlim(-float(self.event_details["pre_seconds"]),
-                          float(self.event_details["post_seconds"]))
-        figure.suptitle(
-            f"Event analysis | {self.event_details['marker_name']} | "
-            f"n={self.event_details['included_trials']} | mean ± SEM",
-            fontsize=12,
-        )
+        self.plot_event_analysis_axes(axes, interactive=False)
+        figure.suptitle(self.event_analysis_title("mean ± SEM"), fontsize=12)
         save_args: dict[str, Any] = {"facecolor": "white", "format": path.suffix.lstrip(".")}
         if path.suffix.lower() == ".png":
             save_args["dpi"] = 220
@@ -2197,6 +2504,85 @@ class PretreatmentApp:
                 figure.savefig(path, **save_args)
         else:
             figure.savefig(path, **save_args)
+
+    def ordered_event_export_signals(self) -> list[dict[str, str]]:
+        """Return selected signals in 410, 470, 560, then ratio column order."""
+        if self.event_details is None:
+            return []
+        wavelength_order = {value: index for index, value in enumerate(WAVELENGTHS)}
+
+        def order_key(signal: dict[str, str]) -> tuple[int, int]:
+            if signal.get("kind") == "wavelength":
+                wavelength = signal.get("key", "").split(":", 1)[-1]
+                return 0, wavelength_order.get(wavelength, len(wavelength_order))
+            return 1, 0
+
+        return sorted(self.event_details.get("selected_signals", []), key=order_key)
+
+    @staticmethod
+    def event_export_prefix(signal: dict[str, str]) -> str:
+        if signal.get("kind") == "wavelength":
+            return signal.get("key", "wavelength").split(":", 1)[-1]
+        numerator = signal.get("numerator", "numerator")
+        denominator = signal.get("denominator", "denominator")
+        return f"ratio_{numerator}_{denominator}"
+
+    def event_trials_for_export(self) -> pd.DataFrame:
+        """Convert internal long-form trials to signal-grouped wide columns."""
+        if self.event_trials is None:
+            raise ValueError("Calculate event analysis before exporting event trials.")
+        if "event_signal_key" not in self.event_trials:
+            return self.event_trials.copy()
+        merge_keys = ["source_event_index", "relative_time_s"]
+        common_columns = [
+            "source_event_index", "marker_name", "marker_time_min",
+            "relative_time_s", "event_baseline",
+        ]
+        available_common = [column for column in common_columns if column in self.event_trials]
+        wide = (self.event_trials[available_common]
+                .drop_duplicates(subset=merge_keys)
+                .copy())
+        metric_columns = [
+            "trial", "corrected_signal", "dff_percent", "zscore", "f0", "baseline_dff_sd",
+        ]
+        for signal in self.ordered_event_export_signals():
+            prefix = self.event_export_prefix(signal)
+            signal_frame = self.event_trials.loc[
+                self.event_trials["event_signal_key"] == signal["key"],
+                [*merge_keys, *metric_columns],
+            ].copy()
+            signal_frame = signal_frame.rename(
+                columns={column: f"{prefix}_{column}" for column in metric_columns}
+            )
+            wide = wide.merge(signal_frame, on=merge_keys, how="left", validate="one_to_one")
+        return wide.sort_values(merge_keys, kind="stable").reset_index(drop=True)
+
+    def event_average_for_export(self) -> pd.DataFrame:
+        """Convert internal long-form averages to signal-grouped wide columns."""
+        if self.event_average is None:
+            raise ValueError("Calculate event analysis before exporting event averages.")
+        if "event_signal_key" not in self.event_average:
+            return self.event_average.copy()
+        merge_keys = ["relative_time_s"]
+        common_columns = ["relative_time_s", "event_baseline"]
+        wide = (self.event_average[common_columns]
+                .drop_duplicates(subset=merge_keys)
+                .copy())
+        metric_columns = [
+            "n_trials", "corrected_signal_mean", "corrected_signal_sem",
+            "dff_percent_mean", "dff_percent_sem", "zscore_mean", "zscore_sem",
+        ]
+        for signal in self.ordered_event_export_signals():
+            prefix = self.event_export_prefix(signal)
+            signal_frame = self.event_average.loc[
+                self.event_average["event_signal_key"] == signal["key"],
+                [*merge_keys, *metric_columns],
+            ].copy()
+            signal_frame = signal_frame.rename(
+                columns={column: f"{prefix}_{column}" for column in metric_columns}
+            )
+            wide = wide.merge(signal_frame, on=merge_keys, how="left", validate="one_to_one")
+        return wide.sort_values(merge_keys, kind="stable").reset_index(drop=True)
 
     def resolve_export_annotation(self) -> tuple[tuple[float, float] | None, str]:
         """Return an export highlight in the plotted time coordinate."""
@@ -2290,12 +2676,15 @@ class PretreatmentApp:
             saved_event = (
                 self.event_details["marker_name"], self.event_details["pre_seconds"],
                 self.event_details["post_seconds"], self.event_details["baseline_seconds"],
+                tuple(self.event_details.get("selected_marker_ids", [])),
+                tuple(self.event_details.get("selected_signal_keys", [])),
                 self.event_details.get("smoothing_seconds", 0.0),
             )
             if current_event != saved_event:
                 messagebox.showinfo(
                     "Event Settings Changed",
-                    "The marker, event intervals, baseline, or smoothing has changed. Recalculate event analysis.",
+                    "The signal selection, marker selection, event intervals, baseline, or smoothing has changed. "
+                    "Recalculate event analysis.",
                 )
                 return
         if normalization_requested and not self.normalized:
@@ -2335,10 +2724,10 @@ class PretreatmentApp:
             pd.DataFrame(self.sorted_markers()).to_csv(output / "markers_working_copy.csv", index=False)
             if selections["event_csv"]:
                 assert self.event_trials is not None and self.event_average is not None
-                self.event_trials.to_csv(
+                self.event_trials_for_export().to_csv(
                     output / "event_aligned_trials.csv", index=False, float_format="%.9g"
                 )
-                self.event_average.to_csv(
+                self.event_average_for_export().to_csv(
                     output / "event_aligned_average.csv", index=False, float_format="%.9g"
                 )
             time_columns = ["original_time_s", "original_time_min", "relative_time_s", "relative_time_min"]

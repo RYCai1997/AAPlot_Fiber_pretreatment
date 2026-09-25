@@ -53,14 +53,36 @@ same applied settings are used on screen and in PNG, CSV, and AAPlot-compatible 
 
 ## Marker-aligned event analysis
 
-The **Event Analysis** tab operates on the current analysis trace. To analyze 560 by
-itself, choose 560 as **Analysis Wavelength** and `None` as **Reference Wavelength**,
-apply correction, then calculate event dF/F0 and Z-score. To analyze 560/410 or
-560−410, choose 560 and 410 with the corresponding combination.
+The **Event Analysis** tab operates on corrected data and has its own multi-select
+signal list. Every available corrected wavelength (410, 470, and/or 560) can be
+analyzed separately, together with the ratio
+defined by the current **Analysis Wavelength / Reference Wavelength** pair. Choose one
+or several signals, or use **Select All Signals**. When several signals are selected,
+their trial traces and mean ± SEM curves are distinguished by signal in the same
+four-panel event figure. Event CSV files use wide, signal-grouped columns: common
+marker/time columns first, followed by all 410 result columns, then 470, then 560 when
+available, and finally the selected ratio. If 560 is unavailable, the ratio columns
+follow 470 directly.
 
-Every marker with the selected name is treated as one trial. Each complete trial is
-interpolated to a common time axis and normalized using its own pre-marker baseline.
-Outputs include trial-level and mean ± SEM dF/F0 and Z-score tables and figures.
+After choosing a marker name, the matching markers appear in a multi-select list and
+are all selected by default. Use Ctrl/Shift-click, **Select All**, or **Clear Selection**
+to analyze any subset of those markers. Each selected complete trial is interpolated
+to a common time axis and normalized using its own pre-marker baseline. Outputs include
+trial-level and mean ± SEM dF/F0 and Z-score tables and figures, while the JSON log records
+the exact selected marker IDs and times.
+
+## Updates — 2026-09-25
+
+- Added trial-level marker selection in **Event Analysis**. Matching markers are selected
+  by default, but any contiguous or non-contiguous subset can be analyzed.
+- Added independent event-signal selection for corrected 410, 470, and 560 traces plus
+  the ratio defined by the current analysis/reference wavelength pair. Signals can be
+  selected individually, in any combination, or all at once.
+- Changed `event_aligned_trials.csv` and `event_aligned_average.csv` from stacked
+  long-form signal rows to wide, signal-grouped columns. Columns are ordered as common
+  event information, 410 results, 470 results, optional 560 results, then ratio results.
+- Event figures, CSV output, and `parameters_and_marker_edits.json` now retain the exact
+  marker subset and signal selection used for each calculation.
 
 ## Result output
 
