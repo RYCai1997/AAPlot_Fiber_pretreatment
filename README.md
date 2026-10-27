@@ -100,6 +100,6 @@ Original input files are read-only and are never modified.
 ## Author and development
 
 Developed by **Ruyi Cai**, **Sophielothia** and **nexsrust** at **Peking University**, with development assistance from
-**OpenAI Codex**.
+**OpenAI Codex** and **DeepSeek Harness**.
 
 
