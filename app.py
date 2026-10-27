@@ -39,7 +39,7 @@ DEFAULT_STRINGS = {
     "norm_start": "0", "norm_end": "1",
     "norm_pre_duration": "5", "zero_time": "0", "downsample_value": "1",
     "export_window_duration": "5",
-    "event_pre_seconds": "10", "event_post_seconds": "40", "event_baseline_seconds": "2",
+    "event_pre_seconds": "5", "event_post_seconds": "30", "event_baseline_seconds": "5",
     "event_status": "Select a marker name after loading data.",
     "x_start": "", "x_span": "", "x_end": "", "output_name": "",
     "marker_time": "0", "marker_name": "marker", "status": "Select a recording folder.",
@@ -55,7 +55,7 @@ LINE_WIDTH_LABELS = {
     "raw560": "Raw 560",
     "fit560": "560 fit",
     "corrected560": "Corrected 560",
-    "combined": "Ratio / subtraction",
+    "combined": "Ratio",
     "dff": "dF/F0",
     "zscore": "Z-score",
 }
@@ -559,8 +559,8 @@ class PretreatmentApp:
         self.x_left_label_var = tk.StringVar(value="X Left (min)")
         self.x_range_label_var = tk.StringVar(value="X Range (min)")
         self.x_right_label_var = tk.StringVar(value="X Right (min)")
-        self.smooth_enabled_var = tk.BooleanVar(value=True)
-        self.downsample_enabled_var = tk.BooleanVar(value=True)
+        self.smooth_enabled_var = tk.BooleanVar(value=False)
+        self.downsample_enabled_var = tk.BooleanVar(value=False)
         self.downsample_mode_var = tk.StringVar(value="seconds")
         self.applied_smooth_seconds = 0.0
         self.applied_downsample_enabled = False
@@ -582,11 +582,12 @@ class PretreatmentApp:
         self.export_annotation_var = tk.StringVar(value="none")
         self.export_marker_var = tk.StringVar(value="")
         self.export_vars = {
-            "corrected_csv": tk.BooleanVar(value=False), "corrected_png": tk.BooleanVar(value=True),
+            "corrected_csv": tk.BooleanVar(value=False), "corrected_png": tk.BooleanVar(value=False),
             "dff_csv": tk.BooleanVar(value=True), "dff_png": tk.BooleanVar(value=True), "dff_svg": tk.BooleanVar(value=False),
             "zscore_csv": tk.BooleanVar(value=True), "zscore_png": tk.BooleanVar(value=True), "zscore_svg": tk.BooleanVar(value=False),
-            "event_csv": tk.BooleanVar(value=False), "event_png": tk.BooleanVar(value=False),
-            "event_svg": tk.BooleanVar(value=False),
+            "event_csv": tk.BooleanVar(value=True), "event_average_csv": tk.BooleanVar(value=True),
+            "event_png": tk.BooleanVar(value=False), "event_svg": tk.BooleanVar(value=False),
+            "event_trace_png": tk.BooleanVar(value=False), "event_heatmap_png": tk.BooleanVar(value=False),
         }
 
         palette = {
@@ -640,7 +641,7 @@ class PretreatmentApp:
         event_tab = ttk.Frame(notebook, padding=12)
         export_tab = ttk.Frame(notebook, padding=12)
         notebook.add(data_tab, text="Data & Fitting")
-        notebook.add(display_tab, text="dF/F0 & Z-score")
+        notebook.add(display_tab, text="Full trace analysis")
         notebook.add(event_tab, text="Event Analysis")
         notebook.add(export_tab, text="Export Results")
 
@@ -684,7 +685,7 @@ class PretreatmentApp:
         self.reference_wavelength_box.grid(row=row, column=1, sticky="ew"); row += 1
         self.reference_wavelength_box.bind("<<ComboboxSelected>>", lambda _event: self.analysis_selection_changed())
         ttk.Label(data_tab, text="Combine Channels").grid(row=row, column=0, sticky="w")
-        self.combine_box = ttk.Combobox(data_tab, textvariable=self.vars["combine"], values=["ratio", "subtraction"], state="readonly", width=19)
+        self.combine_box = ttk.Combobox(data_tab, textvariable=self.vars["combine"], values=["ratio"], state="readonly", width=19)
         self.combine_box.grid(row=row, column=1, sticky="ew"); row += 1
         self.combine_box.bind("<<ComboboxSelected>>", lambda _event: self.combine_changed())
         ttk.Button(data_tab, text="Apply Correction", command=self.apply_processing, style="Accent.TButton").grid(row=row, column=0, columnspan=2, sticky="ew", pady=(8, 3)); row += 1
@@ -717,7 +718,7 @@ class PretreatmentApp:
         row = self.entry(display_tab, row, "Interval / Step", "downsample_value")
         ttk.Button(display_tab, text="Apply Display Processing", command=self.display_settings_changed).grid(
             row=row, column=0, columnspan=2, sticky="ew", pady=(2, 4)); row += 1
-        row = self.section(display_tab, row, "Normalization Baseline")
+        row = self.section(display_tab, row, "dF/F0/Z-score Baseline")
         baseline_modes = ttk.Frame(display_tab); baseline_modes.grid(row=row, column=0, columnspan=2, sticky="w"); row += 1
         ttk.Radiobutton(baseline_modes, text="Manual", variable=self.norm_mode_var,
                         value="manual").pack(side=tk.LEFT)
@@ -829,18 +830,37 @@ class PretreatmentApp:
 
         row = 0
         row = self.section(export_tab, row, "Output Files")
-        export_labels = [("corrected_csv", "Corrected Fluorescence CSV"), ("corrected_png", "Corrected Fluorescence PNG"),
-                         ("dff_csv", "dF/F0 CSV"), ("dff_png", "dF/F0 PNG"),
-                         ("dff_svg", "dF/F0 SVG (Vector)"), ("zscore_csv", "Z-score CSV"),
-                         ("zscore_png", "Z-score PNG"), ("zscore_svg", "Z-score SVG (Vector)"),
-                         ("event_csv", "Event Trials + Average CSV"),
-                         ("event_png", "Event Trials + Average PNG"),
-                         ("event_svg", "Event Trials + Average SVG")]
-        for index, (key, label) in enumerate(export_labels):
-            ttk.Checkbutton(export_tab, text=label, variable=self.export_vars[key]).grid(
-                row=row + index // 2, column=index % 2, sticky="w", pady=2
-            )
-        row += (len(export_labels) + 1) // 2
+        export_columns = ttk.Frame(export_tab)
+        export_columns.grid(row=row, column=0, columnspan=2, sticky="nsew"); row += 1
+        export_columns.columnconfigure(0, weight=1)
+        export_columns.columnconfigure(1, weight=1)
+        full_trace_column = ttk.LabelFrame(export_columns, text="Full trace plot")
+        full_trace_column.grid(row=0, column=0, sticky="nsew", padx=(0, 4), pady=2)
+        event_column = ttk.LabelFrame(export_columns, text="Event trials")
+        event_column.grid(row=0, column=1, sticky="nsew", padx=(4, 0), pady=2)
+        full_trace_labels = [
+            ("corrected_csv", "Corrected Fluorescence CSV"),
+            ("corrected_png", "Corrected Fluorescence PNG"),
+            ("dff_csv", "dF/F0 CSV"),
+            ("dff_png", "dF/F0 PNG"),
+            ("dff_svg", "dF/F0 SVG (Vector)"),
+            ("zscore_csv", "Z-score CSV"),
+            ("zscore_png", "Z-score PNG"),
+            ("zscore_svg", "Z-score SVG (Vector)"),
+        ]
+        event_labels = [
+            ("event_csv", "Event Trials CSV"),
+            ("event_average_csv", "Event Average CSV"),
+            ("event_png", "Event Average + Trials PNG"),
+            ("event_svg", "Event Average + Trials SVG"),
+            ("event_trace_png", "Per-Marker Trial Traces PNG"),
+            ("event_heatmap_png", "Per-Marker Heatmaps PNG"),
+        ]
+        for column_frame, labels in ((full_trace_column, full_trace_labels), (event_column, event_labels)):
+            for index, (key, label) in enumerate(labels):
+                ttk.Checkbutton(column_frame, text=label, variable=self.export_vars[key]).grid(
+                    row=index, column=0, sticky="w", pady=1, padx=2,
+                )
         row = self.section(export_tab, row, "Trace Annotation")
         annotation_modes = ttk.Frame(export_tab); annotation_modes.grid(row=row, column=0, columnspan=2, sticky="w"); row += 1
         for text, value in [("None", "none"), ("Normalization Baseline", "baseline"), ("After Marker Window", "marker_after")]:
@@ -944,8 +964,8 @@ class PretreatmentApp:
         self.trace_view_var.set("overlay")
         self.show_fit_var.set(True)
         self.box_drag_active = False
-        self.smooth_enabled_var.set(True)
-        self.downsample_enabled_var.set(True)
+        self.smooth_enabled_var.set(False)
+        self.downsample_enabled_var.set(False)
         self.downsample_mode_var.set("seconds")
         self.applied_smooth_seconds = 0.0
         self.applied_downsample_enabled = False
@@ -971,10 +991,12 @@ class PretreatmentApp:
         self.export_annotation_var.set("none")
         self.export_marker_var.set("")
         export_defaults = {
-            "corrected_csv": False, "corrected_png": True,
+            "corrected_csv": False, "corrected_png": False,
             "dff_csv": True, "dff_png": True, "dff_svg": False,
             "zscore_csv": True, "zscore_png": True, "zscore_svg": False,
-            "event_csv": False, "event_png": False, "event_svg": False,
+            "event_csv": True, "event_average_csv": True,
+            "event_png": False, "event_svg": False,
+            "event_trace_png": False, "event_heatmap_png": False,
         }
         for key, value in export_defaults.items():
             self.export_vars[key].set(value)
@@ -1337,45 +1359,30 @@ class PretreatmentApp:
             self.draw_raw_preview()
 
     def combine_changed(self) -> None:
-        """Refresh the raw preview or corrected combination when its operation changes."""
+        """Refresh the raw preview or corrected ratio when the reference changes."""
         primary = self.analysis_wavelength_var.get()
         reference = self.reference_wavelength_var.get()
         if reference in {"", "None"}:
             return
-        method = self.vars["combine"].get()
         if self.processed is None:
             self.rebuild_axes()
             if self.data is not None:
                 self.draw_raw_preview()
-                self.vars["status"].set(
-                    f"Showing the direct raw {primary} {'/' if method == 'ratio' else '-'} {reference} result."
-                )
+                self.vars["status"].set(f"Showing the direct raw {primary} / {reference} result.")
             return
 
         from tkinter import messagebox
-        previous_method = (
-            "ratio" if "/" in str((self.details or {}).get("combined_label", "")) else "subtraction"
-        )
         corrected_primary = self.processed[f"corrected_{primary}"].to_numpy(float)
         corrected_reference = self.processed[f"corrected_{reference}"].to_numpy(float)
-        if method == "ratio":
-            if np.any(np.isfinite(corrected_reference) & np.isclose(corrected_reference, 0)):
-                self.vars["combine"].set(previous_method)
-                messagebox.showerror(
-                    "Cannot Calculate Ratio",
-                    f"The corrected {reference} trace contains zero, so the ratio cannot be calculated.",
-                )
-                return
-            combined = corrected_primary / corrected_reference
-            combined_label = f"Corrected {primary} / {reference} ratio"
-            analysis_reference = self.number(f"baseline{primary}") / self.number(f"baseline{reference}")
-        elif method == "subtraction":
-            combined = corrected_primary - corrected_reference
-            combined_label = f"Corrected {primary} - {reference}"
-            analysis_reference = self.number(f"baseline{primary}") - self.number(f"baseline{reference}")
-        else:
-            self.vars["combine"].set(previous_method)
+        if np.any(np.isfinite(corrected_reference) & np.isclose(corrected_reference, 0)):
+            messagebox.showerror(
+                "Cannot Calculate Ratio",
+                f"The corrected {reference} trace contains zero, so the ratio cannot be calculated.",
+            )
             return
+        combined = corrected_primary / corrected_reference
+        combined_label = f"Corrected {primary} / {reference} ratio"
+        analysis_reference = self.number(f"baseline{primary}") / self.number(f"baseline{reference}")
 
         self.processed["combined_signal"] = combined
         self.processed["analysis_trace"] = combined
@@ -1391,7 +1398,7 @@ class PretreatmentApp:
         self.rebuild_axes()
         self.draw_processed()
         self.vars["status"].set(
-            f"Channel combination changed to {method}. Recalculate dF/F0 and Z-score if needed."
+            "Channel combination changed to the ratio. Recalculate dF/F0 and Z-score if needed."
         )
 
     def channel_changed(self) -> None:
@@ -1581,7 +1588,7 @@ class PretreatmentApp:
             return
         self.vars["status"].set(
             f"Correction complete: {len(self.processed):,} points. The current display remains unsmoothed and not downsampled. "
-            "Apply display processing from the dF/F0 & Z-score tab if needed."
+            "Apply display processing from the Full trace analysis tab if needed."
         )
 
     def rebuild_axes(self) -> None:
@@ -1589,7 +1596,7 @@ class PretreatmentApp:
         keys = list(wavelengths)
         has_reference = self.reference_wavelength_var.get() not in {"", "None"}
         if has_reference:
-            keys.append(self.vars["combine"].get())
+            keys.append("ratio")
         if self.normalized:
             if has_reference or len(wavelengths) > 1:
                 keys.extend([*(f"dff{value}" for value in wavelengths), "dff",
@@ -1968,11 +1975,6 @@ class PretreatmentApp:
                 self.plot_display(ax, x, direct, color="#7B4B94", lw=self.line_width("combined"),
                                   gid="combined")
                 ax.set_ylabel(f"Raw {primary} / {reference}")
-            elif key == "subtraction":
-                direct = raw[primary] - raw[reference]
-                self.plot_display(ax, x, direct, color="#7B4B94", lw=self.line_width("combined"),
-                                  gid="combined")
-                ax.set_ylabel(f"Raw {primary} - {reference}")
             else:
                 ax.text(0.5, 0.5, "Apply fitting to display combined trace", ha="center", va="center", transform=ax.transAxes)
                 ax.set_ylabel(key)
@@ -2012,10 +2014,6 @@ class PretreatmentApp:
                 self.plot_display(ax, x, self.display_values("combined_signal")[indices], color="#7B4B94",
                         lw=self.line_width("combined"), gid="combined")
                 ax.set_ylabel(self.details.get("combined_label") or "Corrected ratio")
-            elif key == "subtraction":
-                self.plot_display(ax, x, self.display_values("combined_signal")[indices], color="#7B4B94",
-                        lw=self.line_width("combined"), gid="combined")
-                ax.set_ylabel(self.details.get("combined_label") or "Corrected subtraction")
             elif key == "dff":
                 self.plot_display(ax, x, self.display_values("dff_percent")[indices], color="#7B4B94",
                         lw=self.line_width("dff"), gid="dff")
@@ -2902,6 +2900,143 @@ class PretreatmentApp:
             wide = wide.merge(signal_frame, on=merge_keys, how="left", validate="one_to_one")
         return wide.sort_values(merge_keys, kind="stable").reset_index(drop=True)
 
+    @staticmethod
+    def event_marker_file_component(marker_name: str) -> str:
+        """Return a Windows-safe file name component for a marker name."""
+        cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", str(marker_name).strip())
+        cleaned = cleaned.strip(" .")
+        return cleaned or "marker"
+
+    def event_trials_wide_frame(self) -> pd.DataFrame:
+        """One shared relative-time axis with per-trial dF/F0 and Z-score columns.
+
+        Trial columns are grouped by signal (a signal prefix is added only when
+        several signals are selected), followed by one empty separator column and
+        then the Z-score columns. Each marker name is exported to its own file.
+        """
+        if self.event_trials is None:
+            raise ValueError("Calculate event analysis before exporting event trials.")
+        if "event_signal_key" not in self.event_trials:
+            return self.event_trials.copy()
+        trials = self.event_trials
+        times = np.sort(trials["relative_time_s"].unique().astype(float))
+        signals = self.ordered_event_export_signals()
+        single_signal = len(signals) <= 1
+        dff_columns: dict[str, np.ndarray] = {}
+        zscore_columns: dict[str, np.ndarray] = {}
+        for signal in signals:
+            prefix = "" if single_signal else f"{self.event_export_prefix(signal)}_"
+            signal_trials = trials.loc[trials["event_signal_key"] == signal["key"]]
+            for trial_number in sorted(int(value) for value in signal_trials["trial"].unique()):
+                indexed = signal_trials.loc[signal_trials["trial"] == trial_number].set_index("relative_time_s")
+                measure_name = f"trial{trial_number:02d}"
+                dff_columns[f"{prefix}dF/F0_{measure_name}"] = indexed["dff_percent"].reindex(times).to_numpy(float)
+                zscore_columns[f"{prefix}Z-score_{measure_name}"] = indexed["zscore"].reindex(times).to_numpy(float)
+        frame = pd.DataFrame({"Time_s": times, **dff_columns})
+        frame[""] = np.nan
+        for column, values in zscore_columns.items():
+            frame[column] = values
+        return frame
+
+    def save_event_trace_figure(self, output: Path) -> None:
+        """Export one marker figure overlaying every trial plus the mean ± SEM."""
+        from matplotlib.figure import Figure
+        if self.event_trials is None or self.event_average is None or self.event_details is None:
+            raise ValueError("Calculate event analysis before exporting event traces.")
+        marker_name = self.event_details["marker_name"]
+        signals = self.ordered_event_export_signals()
+        palette = ["#4C78A8", "#F58518", "#54A24B", "#E45756",
+                   "#72B7B2", "#B279A2", "#9D755D", "#7B4B94"]
+        figure = Figure(figsize=(11, 7), dpi=100, constrained_layout=True)
+        axes = figure.subplots(2, 1, sharex=True, squeeze=False).ravel().tolist()
+        baseline_start = -float(self.event_details["baseline_seconds"])
+        for signal_index, signal in enumerate(signals):
+            color = palette[signal_index % len(palette)]
+            signal_trials = self.event_trials.loc[self.event_trials["event_signal_key"] == signal["key"]]
+            for _trial_number, trial in signal_trials.groupby("trial", sort=True):
+                trial_time = trial["relative_time_s"].to_numpy(float)
+                axes[0].plot(trial_time, trial["dff_percent"].to_numpy(float),
+                             color=color, lw=1.0, alpha=0.45)
+                axes[1].plot(trial_time, trial["zscore"].to_numpy(float),
+                             color=color, lw=1.0, alpha=0.45)
+            average = self.event_average.loc[self.event_average["event_signal_key"] == signal["key"]]
+            relative_time = average["relative_time_s"].to_numpy(float)
+            mean_label = signal["label"] if len(signals) > 1 else "Mean ± SEM"
+            for axis, mean_column, sem_column in (
+                (axes[0], "dff_percent_mean", "dff_percent_sem"),
+                (axes[1], "zscore_mean", "zscore_sem"),
+            ):
+                mean_values = average[mean_column].to_numpy(float)
+                sem_values = average[sem_column].to_numpy(float)
+                mean_color = "#222222" if len(signals) <= 1 else color
+                axis.plot(relative_time, mean_values, color=mean_color, lw=2.0, label=mean_label)
+                if np.any(np.isfinite(sem_values)):
+                    axis.fill_between(relative_time, mean_values - sem_values, mean_values + sem_values,
+                                      color=mean_color, alpha=0.14)
+        for ax, label in zip(axes, ["dF/F0 (%)", "Z-score"]):
+            ax.axvspan(baseline_start, 0, color="#B8B8B8", alpha=0.18)
+            ax.axvline(0, color="#C43C39", ls="--", lw=1.0)
+            ax.axhline(0, color="#777777", lw=0.7, alpha=0.6)
+            ax.set_ylabel(label)
+            ax.grid(False)
+            ax.spines[["top", "right"]].set_visible(False)
+        axes[0].legend(frameon=False, fontsize=8, loc="upper right")
+        axes[-1].set_xlabel("Time from marker (s)")
+        axes[-1].set_xlim(baseline_start, float(self.event_details["post_seconds"]))
+        figure.suptitle(
+            f"Event trials | {marker_name} | n={self.event_details['included_trials']}", fontsize=11
+        )
+        file_component = self.event_marker_file_component(marker_name)
+        figure.savefig(output / f"event_trials_{file_component}.png", dpi=220, facecolor="white")
+
+    def save_event_heatmap_figure(self, output: Path) -> None:
+        """Export one heatmap file per marker with dF/F0 trials above and Z-score below."""
+        from matplotlib.figure import Figure
+        if self.event_trials is None or self.event_details is None:
+            raise ValueError("Calculate event analysis before exporting event heatmaps.")
+        marker_name = self.event_details["marker_name"]
+        times = np.sort(self.event_trials["relative_time_s"].unique().astype(float))
+        signals = self.ordered_event_export_signals()
+        single_signal = len(signals) <= 1
+        row_labels: list[str] = []
+        matrices: dict[str, list[np.ndarray]] = {"dff_percent": [], "zscore": []}
+        for signal in signals:
+            signal_trials = self.event_trials.loc[self.event_trials["event_signal_key"] == signal["key"]]
+            for trial_number in sorted(int(value) for value in signal_trials["trial"].unique()):
+                trial = signal_trials.loc[signal_trials["trial"] == trial_number].set_index("relative_time_s")
+                row_labels.append(
+                    f"T{trial_number:02d}" if single_signal
+                    else f"{self.event_export_prefix(signal)} T{trial_number:02d}"
+                )
+                for column in matrices:
+                    matrices[column].append(trial[column].reindex(times).to_numpy(float))
+        figure = Figure(figsize=(10, max(5.0, 1.1 * len(row_labels))), dpi=100, constrained_layout=True)
+        axes = figure.subplots(2, 1, squeeze=False).ravel().tolist()
+        for ax, column, label in ((axes[0], "dff_percent", "dF/F0 (%)"),
+                                  (axes[1], "zscore", "Z-score")):
+            data = np.vstack(matrices[column])
+            finite = data[np.isfinite(data)]
+            if finite.size:
+                limit = float(np.nanpercentile(np.abs(finite), 98))
+                if not np.isfinite(limit) or limit <= 0:
+                    limit = 1.0
+                image = ax.imshow(
+                    data, aspect="auto", cmap="RdBu_r", vmin=-limit, vmax=limit,
+                    extent=(float(times[0]), float(times[-1]), len(row_labels), 0),
+                    interpolation="bilinear",
+                )
+                figure.colorbar(image, ax=ax, shrink=0.9, pad=0.01)
+            ax.axvline(0, color="#222222", ls="--", lw=0.9)
+            ax.set_yticks(np.arange(len(row_labels)) + 0.5)
+            ax.set_yticklabels(row_labels, fontsize=7.5)
+            ax.set_ylim(len(row_labels), 0)
+            ax.set_ylabel("Trial")
+            ax.set_title(label)
+        axes[-1].set_xlabel("Time from marker (s)")
+        figure.suptitle(f"Event heatmap | {marker_name}", fontsize=11)
+        file_component = self.event_marker_file_component(marker_name)
+        figure.savefig(output / f"event_heatmap_{file_component}.png", dpi=220, facecolor="white")
+
     def resolve_export_annotation(self) -> tuple[tuple[float, float] | None, str]:
         """Return an export highlight in the plotted time coordinate."""
         mode = self.export_annotation_var.get()
@@ -2979,7 +3114,10 @@ class PretreatmentApp:
         normalization_requested = any(selections[key] for key in (
             "dff_csv", "dff_png", "dff_svg", "zscore_csv", "zscore_png", "zscore_svg"
         ))
-        event_requested = any(selections[key] for key in ("event_csv", "event_png", "event_svg"))
+        event_requested = any(selections[key] for key in (
+            "event_csv", "event_average_csv", "event_png", "event_svg",
+            "event_trace_png", "event_heatmap_png",
+        ))
         if event_requested and (self.event_trials is None or self.event_average is None or self.event_details is None):
             messagebox.showinfo(
                 "Event Analysis Required",
@@ -3041,10 +3179,13 @@ class PretreatmentApp:
             output.mkdir(parents=True, exist_ok=True)
             pd.DataFrame(self.sorted_markers()).to_csv(output / "markers_working_copy.csv", index=False)
             if selections["event_csv"]:
-                assert self.event_trials is not None and self.event_average is not None
-                self.event_trials_for_export().to_csv(
-                    output / "event_aligned_trials.csv", index=False, float_format="%.9g"
+                assert self.event_trials is not None and self.event_details is not None
+                marker_component = self.event_marker_file_component(self.event_details["marker_name"])
+                self.event_trials_wide_frame().to_csv(
+                    output / f"event_trials_{marker_component}.csv", index=False, float_format="%.9g"
                 )
+            if selections["event_average_csv"]:
+                assert self.event_average is not None
                 self.event_average_for_export().to_csv(
                     output / "event_aligned_average.csv", index=False, float_format="%.9g"
                 )
@@ -3135,6 +3276,10 @@ class PretreatmentApp:
                 self.save_event_analysis_figure(output / "event_aligned_dFF_zscore.png")
             if selections["event_svg"]:
                 self.save_event_analysis_figure(output / "event_aligned_dFF_zscore.svg")
+            if selections["event_trace_png"]:
+                self.save_event_trace_figure(output)
+            if selections["event_heatmap_png"]:
+                self.save_event_heatmap_figure(output)
 
             marker_values = np.zeros(len(export_frame), dtype=int)
             time_values = export_frame["relative_time_s"].to_numpy(float)

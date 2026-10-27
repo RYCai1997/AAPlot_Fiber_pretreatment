@@ -23,7 +23,7 @@ class ProcessingConfig:
     wavelengths: list[str] = field(default_factory=list)
     analysis_wavelength: str = "470"
     reference_wavelength: str | None = "410"
-    combine: str = "ratio"  # ratio | subtraction
+    combine: str = "ratio"  # ratio only
     fit_model: str = "double_exponential"
     smooth_seconds: float = 10.0
     fit_regions: dict[str, list[tuple[float, float]]] = field(default_factory=dict)
@@ -540,20 +540,13 @@ def process_data(
     combined = np.full(len(subset), np.nan)
     combined_label: str | None = None
     if reference is not None:
-        if config.combine == "ratio":
-            if np.any(np.isfinite(corrected[reference]) & np.isclose(corrected[reference], 0)):
-                raise ValueError(
-                    f"The corrected {reference} trace contains zero, so the ratio cannot be calculated."
-                )
-            combined = corrected[primary] / corrected[reference]
-            combined_label = f"Corrected {primary} / {reference} ratio"
-            analysis_reference = config.baselines[primary] / config.baselines[reference]
-        elif config.combine == "subtraction":
-            combined = corrected[primary] - corrected[reference]
-            combined_label = f"Corrected {primary} - {reference}"
-            analysis_reference = config.baselines[primary] - config.baselines[reference]
-        else:
-            raise ValueError(f"Unknown combination method: {config.combine}")
+        if np.any(np.isfinite(corrected[reference]) & np.isclose(corrected[reference], 0)):
+            raise ValueError(
+                f"The corrected {reference} trace contains zero, so the ratio cannot be calculated."
+            )
+        combined = corrected[primary] / corrected[reference]
+        combined_label = f"Corrected {primary} / {reference} ratio"
+        analysis_reference = config.baselines[primary] / config.baselines[reference]
         analysis_trace = combined.copy()
     else:
         analysis_trace = corrected[primary].copy()

@@ -44,12 +44,12 @@ fit, correction, dF/F0, Z-score, plotting, and export support as 410 and 470.
 2. For every visible wavelength, enter its **Offset** and **Fitting Baseline**, then open
    **Configure <wavelength> Fit...** to select one or more fitting regions and the model.
 3. Choose the **Analysis Wavelength** and, optionally, a **Reference Wavelength**. With a
-   reference, pick **Combine Channels** = `ratio` or `subtraction`; with `None`, the
+   reference, the corrected channels are combined as `ratio`; with `None`, the
    independently corrected analysis wavelength is used directly.
 4. Click **Apply Correction**. Every available wavelength is corrected independently.
 
-Whole-recording normalization and event analysis are then configured on the **dF/F0 &
-Z-score** and **Event Analysis** tabs, and files are written from the **Export Results**
+Whole-recording normalization and event analysis are then configured on the **Full trace
+analysis** and **Event Analysis** tabs, and files are written from the **Export Results**
 tab.
 
 ## Correction and fitting
@@ -84,12 +84,13 @@ zooming draw from a reduced copy for speed; the full-resolution curves come back
 interaction ends. Exports are not affected by that display-only reduction: they contain
 every row that survives the applied smoothing and downsampling.
 
-## dF/F0 and Z-score
+## Full trace analysis (dF/F0 and Z-score)
 
 Applying correction does not reuse the fitting regions as the normalization baseline. On
-**dF/F0 & Z-score**, select a **Manual** or **Pre-Marker Interval** baseline, an optional
-baseline marker, and optional relative time (**Use Marker as Time 0** or **Use Specified
-Time as 0**), then click **Calculate dF/F0 & Z-score**.
+**Full trace analysis**, select a **Manual** or **Pre-Marker Interval** baseline in the
+**dF/F0/Z-score Baseline** section, an optional baseline marker, and optional relative time
+(**Use Marker as Time 0** or **Use Specified Time as 0**), then click **Calculate dF/F0 &
+Z-score**. Smoothing and downsampling are off by default; enable them only when needed.
 
 - `F0` is the mean corrected analysis trace in the baseline.
 - dF/F0 is `100 × (F - F0) / F0`.
@@ -112,13 +113,17 @@ figure.
 After choosing a **Marker Name**, the matching markers appear in **Markers to Analyze** and
 are all selected by default. Use Ctrl/Shift-click, **Select All**, or **Clear Selection**
 to analyze any subset of those markers, then click **Calculate Event dF/F0 & Z-score**.
-Each selected complete trial is interpolated to a common time axis and normalized using
-its own pre-marker baseline. Outputs include trial-level and mean ± SEM dF/F0 and Z-score
-tables and figures, while the JSON log records the exact selected marker IDs and times.
+The default window is 5 s before and 30 s after the marker, with a 5 s pre-marker
+baseline. Each selected complete trial is interpolated to a common time axis and
+normalized using its own pre-marker baseline. Outputs include trial-level and mean ± SEM
+dF/F0 and Z-score tables and figures, while the JSON log records the exact selected marker
+IDs and times.
 
-Event CSV files use wide, signal-grouped columns: common marker/time columns first, then
-all 410 result columns, then 470, then 560 when available, and finally the selected ratio.
-If 560 is unavailable, the ratio columns follow 470 directly.
+Event CSV files are grouped by marker name: one file per analyzed marker, with the shared
+relative time axis in the first column, one `dF/F0_trialNN` column per trial, one empty
+separator column, then the matching `Z-score_trialNN` columns. When several signals are
+selected, column names carry the signal prefix (`410_dF/F0_trial01`,
+`ratio_470_410_dF/F0_trial01`) and columns are grouped signal by signal.
 
 ## Result output
 
@@ -132,7 +137,11 @@ changed. Depending on the selected boxes, the folder contains:
   wavelength;
 - `dFF0_trace.csv` / `.png` / `.svg`, including per-wavelength dF/F0;
 - `zscore_trace.csv` / `.png` / `.svg`, including per-wavelength Z-score;
-- `event_aligned_trials.csv`, `event_aligned_average.csv`, and event figures;
+- `event_trials_<marker>.csv` (one file per analyzed marker name) and
+  `event_aligned_average.csv`;
+- `event_aligned_dFF_zscore.png` / `.svg`, the four-panel trial and average overview;
+- `event_trials_<marker>.png`, every trial of that marker overlaid in two panels;
+- `event_heatmap_<marker>.png`, with the dF/F0 trials above and the Z-score trials below;
 - `markers_working_copy.csv` and `parameters_and_marker_edits.json`;
 - AAPlot-compatible `Time,Signal,Marker` text files in the `AAPlot_corrected_trace`,
   `AAPlot_dFF0`, and `AAPlot_zscore` subfolders.
@@ -173,6 +182,17 @@ Original input files are read-only and are never modified.
   decimated, reducing the per-frame redraw cost.
 - Set `AAPLOT_FIT_EXACT=1` before launching to reproduce the previous fitting path bit for
   bit.
+- Removed the `subtraction` channel combination; a reference wavelength is always combined
+  as `ratio`. The **Combine Channels** field keeps only that option.
+- Renamed the normalization tab to **Full trace analysis**, left smoothing and downsampling
+  off by default, and renamed its baseline section to **dF/F0/Z-score Baseline**.
+- Event defaults are now 5 s before and 30 s after the marker with a 5 s baseline.
+- Split **Export Results** into a **Full trace plot** column and an **Event trials** column;
+  event defaults are the two CSV outputs.
+- `event_trials_<marker>.csv` replaces `event_aligned_trials.csv`: a shared `Time_s` column,
+  per-trial dF/F0 columns, one empty separator column, then the per-trial Z-score columns.
+- Added per-marker overlayed trial figures (`event_trials_<marker>.png`) and per-marker
+  heatmaps (`event_heatmap_<marker>.png`).
 
 ## Author and development
 
