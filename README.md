@@ -83,6 +83,25 @@ the exact selected marker IDs and times.
   event information, 410 results, 470 results, optional 560 results, then ratio results.
 - Event figures, CSV output, and `parameters_and_marker_edits.json` now retain the exact
   marker subset and signal selection used for each calculation.
+- Performance update (2026-10-27): reworked the multi-start fitting path so every
+  candidate start is screened on a ~600-point subsample and only the three best are
+  refined on the full fitting data, while each model keeps its previous iteration
+  budget (single-exponential 3000/5000, double-exponential 5000/8000). Fitting a
+  selected trace is 2–4× faster and the fitted curve stays within noise of the
+  previous implementation.
+- Performance update (2026-10-27): added a fit cache keyed by data version and channel
+  settings, so re-applying the same correction, or correcting a single changed
+  wavelength, no longer refits every channel.
+- Performance update (2026-10-27): fitting now runs on a worker thread with a progress
+  bar and a **Cancel** button, keeping the window responsive; results whose data
+  version or fit settings changed in the meantime are discarded instead of applied.
+- Performance update (2026-10-27): panning and zooming no longer redraw the full
+  traces. Curves are drawn with a min/max envelope, resampled from the full series
+  whenever the X range changes, and switched to a coarse copy while dragging.
+- Performance update (2026-10-27): markers are drawn as a single `vlines` artist and
+  the fitting-window scatter is decimated, reducing the per-frame redraw cost.
+- Performance update (2026-10-27): set `AAPLOT_FIT_EXACT=1` before launching to
+  reproduce the previous fitting path bit for bit.
 
 ## Result output
 
