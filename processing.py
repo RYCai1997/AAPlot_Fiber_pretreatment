@@ -1,6 +1,8 @@
 """Read-only data loading and wavelength-independent photometry fitting."""
 from __future__ import annotations
 
+import copy
+import os
 import uuid
 import re
 from dataclasses import dataclass, field
@@ -31,6 +33,32 @@ class ProcessingConfig:
 
 
 SUPPORTED_WAVELENGTHS = ("410", "470", "560")
+
+# Multi-start budgeting. Every start is still evaluated; cheap starts are
+# screened on a coarse subsample and only the most promising ones are refined
+# on the full sample, then the winner is refined on every selected sample.
+# The model, bounds, loss and the complete start set are unchanged.
+MULTISTART_SCREEN_POINTS = 600
+MULTISTART_SCREEN_MAX_NFEV = 600
+MULTISTART_SELECT_TOP = 3
+MULTISTART_REFINE_MAX_NFEV = 5000
+FINAL_REFINE_MAX_NFEV = 8000
+OPTIMIZER_TOLERANCE = 1e-6
+
+# AAPLOT_FIT_EXACT=1 restores the pre-optimization behaviour: every start runs
+# to convergence on the full sample and the default tolerances are used. It is
+# slower, but it reproduces the historical curves bit for bit when a narrow fit
+# region leaves the two-exponential solution under-determined.
+FIT_EXACT = os.environ.get("AAPLOT_FIT_EXACT", "").strip().lower() in {"1", "true", "yes", "on"}
+
+# Per-start and final budgets of the historical implementation, kept identical
+# so that a converged solution does not change (only the screening stage is new).
+_SINGLE_MAX_NFEV = 3000
+_SINGLE_FINAL_MAX_NFEV = 5000
+
+
+class ProcessingCancelled(RuntimeError):
+    """Raised when the user cancels a background processing job."""
 
 
 def available_recording_channels(data: pd.DataFrame) -> dict[str, list[str]]:
@@ -109,6 +137,100 @@ def region_mask(time_min: np.ndarray, regions: list[tuple[float, float]]) -> np.
     return mask
 
 
+def _tolerances() -> dict[str, float]:
+    if FIT_EXACT:
+        return {}
+    return {"ftol": OPTIMIZER_TOLERANCE, "xtol": OPTIMIZER_TOLERANCE, "gtol": OPTIMIZER_TOLERANCE}
+
+def _final_refine_nfev(model: str) -> int:
+    """Budget of the last all-selected-samples refinement (historical values)."""
+    if model == "single_exponential":
+        return _SINGLE_FINAL_MAX_NFEV
+    return FINAL_REFINE_MAX_NFEV
+
+
+def _start_nfev(model: str) -> int:
+    """Per-start budget of the historical multi-start loop."""
+    if model == "single_exponential":
+        return _SINGLE_MAX_NFEV
+    return MULTISTART_REFINE_MAX_NFEV
+
+
+def _best_result(results: list[Any]) -> Any:
+    """Pick the lowest-cost result, ranking non-finite costs last."""
+    def sort_key(item: Any) -> float:
+        cost = float(item.cost)
+        return cost if np.isfinite(cost) else np.inf
+    return min(results, key=sort_key)
+
+
+def _rank_candidates(results: list[Any]) -> list[Any]:
+    """Order screened candidates by cost, breaking near-ties by start order.
+
+    窄选区下双指数存在多个代价等价解，此时按原起点顺序决胜，使筛选结果与
+    「逐起点全量精炼」的旧实现一致。
+    """
+    costs = [float(item.cost) for item in results]
+    finite = [cost for cost in costs if np.isfinite(cost)]
+    base_cost = min(finite) if finite else 0.0
+    scale = abs(base_cost) if base_cost > 0.0 else 1.0
+
+    def sort_key(entry: tuple[int, float]) -> tuple[float, int]:
+        index, cost = entry
+        if not np.isfinite(cost):
+            return (np.inf, index)
+        return (round(cost / scale, 2), index)
+
+    order = sorted(enumerate(costs), key=sort_key)
+    return [results[index] for index, _cost in order]
+
+
+def _multi_start_curve(
+    starts: list[np.ndarray],
+    curve,
+    model: str,
+    xf: np.ndarray,
+    yf: np.ndarray,
+    xs: np.ndarray,
+    ys: np.ndarray,
+    lower: np.ndarray,
+    upper: np.ndarray,
+    noise: float,
+) -> Any:
+    """Screen every start on a coarse subsample, then refine only the best few.
+
+    Every start in ``starts`` is still evaluated; the model, bounds, loss and
+    the full start set are unchanged. ``xs/ys`` is the cheap screening sample,
+    ``xf/yf`` the full fitting sample used for the refined candidates. When the
+    screening sample already is the full sample (fewer valid points than
+    ``MULTISTART_SCREEN_POINTS``) a 600-nfev screen would rank unconverged
+    starts, so every start is fitted on the full sample with its historical
+    budget instead.
+    """
+    tol = _tolerances()
+    start_budget = _start_nfev(model)
+    same_sample = len(xs) == len(xf) and np.array_equal(xs, xf)
+    if FIT_EXACT or same_sample:
+        results = [
+            least_squares(lambda p: curve(p, xf) - yf, start, bounds=(lower, upper),
+                          loss="soft_l1", f_scale=noise, max_nfev=start_budget, **tol)
+            for start in starts
+        ]
+        return _best_result(results)
+    screened = [
+        least_squares(lambda p: curve(p, xs) - ys, start, bounds=(lower, upper),
+                      loss="soft_l1", f_scale=noise, max_nfev=MULTISTART_SCREEN_MAX_NFEV, **tol)
+        for start in starts
+    ]
+    screened = _rank_candidates(screened)
+    refined = [
+        least_squares(lambda p: curve(p, xf) - yf, candidate.x, bounds=(lower, upper),
+                      loss="soft_l1", f_scale=noise, max_nfev=start_budget, **tol)
+        for candidate in screened[: max(1, MULTISTART_SELECT_TOP)]
+    ]
+    return _best_result(refined)
+
+
 def fit_bleaching(
     time_s: np.ndarray,
     values: np.ndarray,
@@ -136,6 +258,8 @@ def fit_bleaching(
     valid_indices = np.flatnonzero(valid)
     keep = sample_indices(len(valid_indices), 4000)
     xf, yf = x[valid_indices[keep]], y[valid_indices[keep]]
+    xs: np.ndarray | None = None
+    ys: np.ndarray | None = None
     spread = max(float(np.percentile(yf, 99) - np.percentile(yf, 1)), 1e-6)
     differences = np.diff(yf)
     noise = max(1.4826 * float(np.median(np.abs(differences - np.median(differences)))), spread * 1e-4)
@@ -149,23 +273,27 @@ def fit_bleaching(
             denominator = float(np.dot(xf, xf))
             initial_slope = float(np.dot(xf, yf - baseline) / denominator) if denominator else 0.0
             residual = lambda p, xx, yy: baseline + p[0] * xx - yy
-            result = least_squares(lambda p: residual(p, xf, yf), [initial_slope], loss="soft_l1", f_scale=noise)
+            result = least_squares(lambda p: residual(p, xf, yf), [initial_slope], loss="soft_l1",
+                                   f_scale=noise, **_tolerances())
             result = least_squares(lambda p: residual(p, x[valid], y[valid]), result.x,
-                                   loss="soft_l1", f_scale=noise)
+                                   loss="soft_l1", f_scale=noise, **_tolerances())
             fitted = baseline + result.x[0] * x
             parameters: dict[str, Any] = {"fixed_baseline": baseline, "slope_per_s": float(result.x[0])}
             parameter_count = 1
         else:
             slope_guess = float(np.polyfit(xf, yf, 1)[0])
             residual = lambda p, xx, yy: p[0] + p[1] * xx - yy
-            result = least_squares(lambda p: residual(p, xf, yf), [baseline, slope_guess], loss="soft_l1", f_scale=noise)
+            result = least_squares(lambda p: residual(p, xf, yf), [baseline, slope_guess],
+                                   loss="soft_l1", f_scale=noise, **_tolerances())
             result = least_squares(lambda p: residual(p, x[valid], y[valid]), result.x,
-                                   loss="soft_l1", f_scale=noise)
+                                   loss="soft_l1", f_scale=noise, **_tolerances())
             fitted = result.x[0] + result.x[1] * x
             parameters = {"baseline_initial": baseline, "fitted_constant": float(result.x[0]),
                           "slope_per_s": float(result.x[1])}
             parameter_count = 2
     else:
+        screen_keep = sample_indices(len(valid_indices), MULTISTART_SCREEN_POINTS)
+        xs, ys = x[valid_indices[screen_keep]], y[valid_indices[screen_keep]]
         early = yf[np.argsort(xf)[: max(5, len(yf) // 50)]]
         amplitude = float(np.median(early) - baseline)
         tau_min, tau_max = max(0.2, duration / 100000), max(10.0, duration * 20)
@@ -189,11 +317,10 @@ def fit_bleaching(
                 if baseline_mode == "fit_constant":
                     start.append(baseline)
                 starts.append(np.asarray(start, float))
-            candidates = [least_squares(lambda p: curve(p, xf) - yf, start, bounds=(lower, upper),
-                                        loss="soft_l1", f_scale=noise, max_nfev=3000) for start in starts]
-            result = min(candidates, key=lambda item: item.cost)
+            result = _multi_start_curve(starts, curve, model, xf, yf, xs, ys, lower, upper, noise)
             result = least_squares(lambda p: curve(p, x[valid]) - y[valid], result.x,
-                                   bounds=(lower, upper), loss="soft_l1", f_scale=noise, max_nfev=5000)
+                                   bounds=(lower, upper), loss="soft_l1", f_scale=noise,
+                                   max_nfev=_final_refine_nfev(model), **_tolerances())
             fitted = curve(result.x, x)
             parameters = {"amplitude": float(result.x[0]), "tau_s": float(result.x[1])}
             if baseline_mode == "fixed":
@@ -228,11 +355,10 @@ def fit_bleaching(
                     if baseline_mode == "fit_constant":
                         start.append(baseline)
                     starts.append(np.asarray(start, float))
-            candidates = [least_squares(lambda p: curve(p, xf) - yf, start, bounds=(lower, upper),
-                                        loss="soft_l1", f_scale=noise, max_nfev=5000) for start in starts]
-            result = min(candidates, key=lambda item: item.cost)
+            result = _multi_start_curve(starts, curve, model, xf, yf, xs, ys, lower, upper, noise)
             result = least_squares(lambda p: curve(p, x[valid]) - y[valid], result.x,
-                                   bounds=(lower, upper), loss="soft_l1", f_scale=noise, max_nfev=8000)
+                                   bounds=(lower, upper), loss="soft_l1", f_scale=noise,
+                                   max_nfev=_final_refine_nfev(model), **_tolerances())
             fitted = curve(result.x, x)
             parameters = {
                 "amplitude_1": float(result.x[0]), "amplitude_2": float(result.x[1]),
@@ -270,6 +396,13 @@ def fit_bleaching(
         "baseline_mode": baseline_mode,
         "fit_samples": int(valid.sum()),
         "multistart_samples": int(len(xf)),
+        "multistart_screen_samples": int(len(xs)) if xs is not None else 0,
+        "multistart_screened": bool(xs is not None and not np.array_equal(xs, xf)),
+        "multistart_start_count": int(len(starts)) if "starts" in locals() else 0,
+        "multistart_refined_starts": (
+            int(len(starts)) if (xs is None or np.array_equal(xs, xf))
+            else int(min(len(starts), MULTISTART_SELECT_TOP))
+        ) if "starts" in locals() else 0,
         "final_refinement_samples": int(valid.sum()),
         "score_samples": int(score_n),
         "cost": float(result.cost),
@@ -328,7 +461,19 @@ def select_effective_data(data: pd.DataFrame, config: ProcessingConfig) -> pd.Da
     return data.loc[use].reset_index(drop=True)
 
 
-def process_data(data: pd.DataFrame, config: ProcessingConfig) -> tuple[pd.DataFrame, dict[str, Any]]:
+def process_data(
+    data: pd.DataFrame,
+    config: ProcessingConfig,
+    cache: dict[Any, Any] | None = None,
+    data_token: Any = None,
+    cancel: Any = None,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Fit every wavelength and build the processed table.
+
+    ``cache`` optionally reuses previous fits. A cached entry is only reused when
+    the full fitting signature matches, so results are identical to a fresh fit.
+    ``cancel`` is an optional ``threading.Event``; it is checked between channels.
+    """
     subset = select_effective_data(data, config)
     time_s = subset["TimeStamp"].to_numpy(float) / 1000
     time_min = time_s / 60
@@ -351,6 +496,8 @@ def process_data(data: pd.DataFrame, config: ProcessingConfig) -> tuple[pd.DataF
     corrected: dict[str, np.ndarray] = {}
     masks: dict[str, np.ndarray] = {}
     for wavelength in wavelengths:
+        if cancel is not None and cancel.is_set():
+            raise ProcessingCancelled()
         column = f"{source}-{wavelength}"
         raw = subset[column].to_numpy(float)
         if np.isfinite(raw).sum() < 20:
@@ -358,11 +505,22 @@ def process_data(data: pd.DataFrame, config: ProcessingConfig) -> tuple[pd.DataF
         offset = float(config.offsets[wavelength])
         baseline = float(config.baselines[wavelength])
         adjusted = raw - offset
-        mask = region_mask(time_min, config.fit_regions.get(wavelength, []))
+        regions = [tuple(region) for region in config.fit_regions.get(wavelength, [])]
+        mask = region_mask(time_min, regions)
         model = config.fit_models.get(wavelength) or config.fit_model
         baseline_mode = config.fit_baseline_modes.get(wavelength) or "fit_constant"
-        fitted, parameters = fit_bleaching(time_s, adjusted, baseline, model, mask, baseline_mode)
-        parameters["fit_regions"] = [list(region) for region in config.fit_regions.get(wavelength, [])]
+        cache_key = (data_token, source, column, model, baseline_mode, offset, baseline,
+                     tuple(regions), float(config.range_start_min), float(config.range_end_min))
+        cached = cache.get(cache_key) if cache is not None else None
+        if cached is not None:
+            fitted, parameters = cached[0], copy.deepcopy(cached[1])
+        else:
+            fitted, parameters = fit_bleaching(time_s, adjusted, baseline, model, mask, baseline_mode)
+            if cache is not None:
+                if len(cache) >= 12:
+                    cache.clear()
+                cache[cache_key] = (np.array(fitted, float, copy=True), copy.deepcopy(parameters))
+        parameters["fit_regions"] = [list(region) for region in regions]
         if np.any(np.isfinite(fitted) & np.isclose(fitted, 0)):
             raise ValueError(
                 f"The fitted {wavelength} curve contains zero. Adjust its baseline, offset, or fitting regions."

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import math
+import queue
 import re
 import sys
+import threading
 import uuid
 from dataclasses import asdict
 from pathlib import Path
@@ -15,6 +17,7 @@ import numpy as np
 import pandas as pd
 
 from processing import (
+    ProcessingCancelled,
     ProcessingConfig,
     available_recording_channels,
     calculate_event_locked_traces,
@@ -116,6 +119,8 @@ class FitWindow:
         self.drag_original_region = (0.0, 0.0)
         self.region_patches: list[Any] = []
         self.readout = tk.StringVar(value="Drag a region to move it; drag either edge to resize it.")
+        self.fit_queue: queue.Queue | None = None
+        self.busy = False
 
         pane = ttk.Panedwindow(self.window, orient=tk.HORIZONTAL)
         pane.pack(fill=tk.BOTH, expand=True)
@@ -132,13 +137,17 @@ class FitWindow:
         self.model_box.bind("<<ComboboxSelected>>", self.invalidate_preview)
         ttk.Label(left, text="The baseline initializes the freely fitted constant (fit_constant).",
                   wraplength=250).pack(anchor="w", pady=(0, 5))
-        ttk.Button(left, text="Add Region", command=self.add_region).pack(fill=tk.X, pady=2)
-        ttk.Button(left, text="Delete Selected Region", command=self.delete_region).pack(fill=tk.X, pady=2)
+        self.add_button = ttk.Button(left, text="Add Region", command=self.add_region)
+        self.add_button.pack(fill=tk.X, pady=2)
+        self.delete_button = ttk.Button(left, text="Delete Selected Region", command=self.delete_region)
+        self.delete_button.pack(fill=tk.X, pady=2)
         self.region_list = tk.Listbox(left, height=12, exportselection=False)
         self.region_list.pack(fill=tk.BOTH, expand=True, pady=6)
         self.region_list.bind("<<ListboxSelect>>", self.list_selection_changed)
-        ttk.Button(left, text="Preview Fit", command=self.preview_fit).pack(fill=tk.X, pady=2)
-        ttk.Button(left, text="Use These Regions", command=self.accept, style="Accent.TButton").pack(fill=tk.X, pady=2)
+        self.preview_button = ttk.Button(left, text="Preview Fit", command=self.preview_fit)
+        self.preview_button.pack(fill=tk.X, pady=2)
+        self.accept_button = ttk.Button(left, text="Use These Regions", command=self.accept, style="Accent.TButton")
+        self.accept_button.pack(fill=tk.X, pady=2)
         ttk.Label(left, textvariable=self.readout, wraplength=250).pack(anchor="w", pady=(8, 0))
 
         self.figure = Figure(figsize=(9, 7), dpi=100, constrained_layout=True)
@@ -176,6 +185,8 @@ class FitWindow:
             self.region_list.see(self.selected_region_index)
 
     def add_region(self) -> None:
+        if self.busy:
+            return
         view_low, view_high = self.ax.get_xlim()
         data_low, data_high = float(self.time_min[0]), float(self.time_min[-1])
         view_low, view_high = max(view_low, data_low), min(view_high, data_high)
@@ -190,6 +201,8 @@ class FitWindow:
         self.refresh_list(); self.draw()
 
     def delete_region(self) -> None:
+        if self.busy:
+            return
         selected = self.region_list.curselection()
         if selected:
             del self.regions[selected[0]]
@@ -227,7 +240,9 @@ class FitWindow:
         selected_mask = region_mask(self.time_min, self.regions)
         selected_indices = np.flatnonzero(selected_mask)
         if selected_indices.size:
-            self.ax.scatter(self.time_min[selected_indices], self.values[selected_indices], s=2.0,
+            step = max(1, -(-selected_indices.size // 6000))
+            shown = selected_indices[::step]
+            self.ax.scatter(self.time_min[shown], self.values[shown], s=2.0,
                             color="#222222", alpha=0.35, label="samples used in fit")
         for marker in self.markers:
             marker_time = float(marker["time_min"])
@@ -286,47 +301,134 @@ class FitWindow:
 
     def preview_fit(self) -> None:
         from tkinter import messagebox
+        if self.fit_queue is not None:
+            return
         try:
             mask = region_mask(self.time_min, self.regions)
             self.selected_model = self.model_var.get()
             self.selected_baseline_mode = self.baseline_mode_var.get()
-            fitted, parameters = fit_bleaching(
-                self.time_s, self.values, self.baseline, self.selected_model, mask,
-                self.selected_baseline_mode,
-            )
-            warning_text = ("\nWarnings: " + "; ".join(parameters["fit_warnings"])) if parameters["fit_warnings"] else ""
-            self.readout.set(
-                f"Model: {self.selected_model} | baseline: {self.selected_baseline_mode}\n"
-                f"Selected samples used in final refinement: {parameters['final_refinement_samples']:,}\n"
-                f"RMSE: {parameters['rmse_selected']:.6g} | BIC: {parameters['bic_selected']:.3f}\n"
-                f"{self.parameter_text(parameters)}\n"
-                f"Converged: {'Yes' if parameters['optimizer_success'] else 'No'} | "
-                f"nfev={parameters['optimizer_nfev']} | optimality={parameters['optimizer_optimality']:.3g}"
-                f"{warning_text}"
-            )
-            self.draw(fitted)
         except Exception as exc:
             messagebox.showerror("Fit failed", str(exc), parent=self.window)
+            return
+        self.readout.set(
+            f"Fitting {self.selected_model} on {len(self.time_min):,} samples in the background... "
+            "The window stays responsive."
+        )
+        self.set_fit_busy(True)
+        self.start_async_fit(mask, self.show_preview_result)
+
+    def show_preview_result(self, fitted: Any, parameters: dict[str, Any]) -> None:
+        warning_text = ("\nWarnings: " + "; ".join(parameters["fit_warnings"])) if parameters["fit_warnings"] else ""
+        self.readout.set(
+            f"Model: {self.selected_model} | baseline: {self.selected_baseline_mode}\n"
+            f"Selected samples used in final refinement: {parameters['final_refinement_samples']:,}\n"
+            f"RMSE: {parameters['rmse_selected']:.6g} | BIC: {parameters['bic_selected']:.3f}\n"
+            f"{self.parameter_text(parameters)}\n"
+            f"Converged: {'Yes' if parameters['optimizer_success'] else 'No'} | "
+            f"nfev={parameters['optimizer_nfev']} | optimality={parameters['optimizer_optimality']:.3g}"
+            f"{warning_text}"
+        )
+        self.draw(fitted)
 
     def accept(self) -> None:
         from tkinter import messagebox
+        if self.fit_queue is not None:
+            return
         try:
             mask = region_mask(self.time_min, self.regions)
             self.selected_model = self.model_var.get()
             self.selected_baseline_mode = self.baseline_mode_var.get()
-            fit_bleaching(self.time_s, self.values, self.baseline, self.selected_model, mask,
-                           self.selected_baseline_mode)
+        except Exception as exc:
+            messagebox.showerror("Invalid fitting regions", str(exc), parent=self.window)
+            return
+        self.readout.set(
+            f"Fitting {self.selected_model} in the background, this window closes when it finishes..."
+        )
+        self.set_fit_busy(True)
+
+        def on_ok(_fitted: Any, _parameters: dict[str, Any]) -> None:
             self.on_accept(self.channel, list(self.regions), self.signature(), self.selected_model,
                            self.selected_baseline_mode)
             self.window.destroy()
-        except Exception as exc:
-            messagebox.showerror("Invalid fitting regions", str(exc), parent=self.window)
+
+        self.start_async_fit(mask, on_ok)
+
+    def set_fit_busy(self, busy: bool) -> None:
+        self.busy = busy
+        state = ["disabled"] if busy else ["!disabled"]
+        for widget in (self.preview_button, self.accept_button, self.add_button,
+                       self.delete_button, self.region_list):
+            try:
+                widget.state(state)
+            except Exception:
+                pass
+        try:
+            self.model_box.state(["disabled"] if busy else ["readonly"])
+        except Exception:
+            pass
+
+    def fit_snapshot(self) -> tuple[Any, ...]:
+        return (self.signature(), tuple((float(start), float(end)) for start, end in self.regions))
+
+    def start_async_fit(self, mask: np.ndarray, on_ok: Callable[[Any, dict[str, Any]], None]) -> None:
+        """Run fit_bleaching on a worker thread; on_ok runs later on the Tk thread."""
+        result_queue: queue.Queue = queue.Queue()
+        self.fit_queue = result_queue
+        snapshot = self.fit_snapshot()
+        args = (self.time_s, self.values, self.baseline, self.selected_model, mask,
+                self.selected_baseline_mode)
+
+        def worker() -> None:
+            try:
+                fitted, parameters = fit_bleaching(*args)
+                result_queue.put(("ok", (fitted, parameters)))
+            except Exception as exc:  # noqa: BLE001 - surfaced in the GUI thread
+                result_queue.put(("error", exc))
+
+        threading.Thread(target=worker, daemon=True, name="fit-window-worker").start()
+        try:
+            self.window.after(120, lambda: self._poll_async_fit(result_queue, on_ok, snapshot))
+        except Exception:
+            self.fit_queue = None
+
+    def _poll_async_fit(self, result_queue: queue.Queue,
+                        on_ok: Callable[[Any, dict[str, Any]], None],
+                        snapshot: tuple[Any, ...] | None = None) -> None:
+        try:
+            if not self.window.winfo_exists():
+                self.fit_queue = None
+                return
+        except Exception:
+            self.fit_queue = None
+            return
+        try:
+            status, payload = result_queue.get_nowait()
+        except queue.Empty:
+            try:
+                self.window.after(120, lambda: self._poll_async_fit(result_queue, on_ok, snapshot))
+            except Exception:
+                self.fit_queue = None
+            return
+        self.fit_queue = None
+        self.set_fit_busy(False)
+        if status == "ok":
+            if snapshot is not None and self.fit_snapshot() != snapshot:
+                self.readout.set("The regions or model changed while fitting; the result was "
+                                 "discarded. Run the fit again.")
+                return
+            fitted, parameters = payload
+            on_ok(fitted, parameters)
+        else:
+            from tkinter import messagebox
+            messagebox.showerror("Fit failed", str(payload), parent=self.window)
 
     def nearest_value(self, x: float) -> tuple[float, float]:
         index = int(np.clip(np.searchsorted(self.time_min, x), 0, len(self.time_min) - 1))
         return float(self.time_min[index]), float(self.values[index])
 
     def press(self, event: Any) -> None:
+        if self.busy:
+            return
         if event.inaxes is not self.ax or event.xdata is None or event.button != 1:
             return
         x = float(event.xdata)
@@ -438,6 +540,13 @@ class PretreatmentApp:
         self.initial_x_limits: tuple[float, float] | None = None
         self.initial_y_limits: dict[str, tuple[float, float]] = {}
         self.display_cache: dict[tuple[str, float], np.ndarray] = {}
+        self.fit_cache: dict[Any, Any] = {}
+        self.fit_job: threading.Thread | None = None
+        self.fit_cancel: threading.Event | None = None
+        self.fit_queue: queue.Queue | None = None
+        self.fit_progress_row: Any = None
+        self.fit_progress_bar: Any = None
+        self.fit_cancel_button: Any = None
         self.zoom_selectors: list[Any] = []
         self.axis_drag_state: dict[str, Any] | None = None
         self.box_drag_active = False
@@ -760,6 +869,10 @@ class PretreatmentApp:
         plot_footer = ttk.Frame(plot_frame, padding=(8, 5)); plot_footer.pack(fill=tk.X)
         width_row = ttk.Frame(plot_footer); width_row.pack(fill=tk.X, pady=(0, 3))
         axis_row = ttk.Frame(plot_footer); axis_row.pack(fill=tk.X)
+        self.fit_progress_row = ttk.Frame(plot_footer)
+        self.fit_progress_anchor = width_row
+        self.fit_progress_bar = ttk.Progressbar(self.fit_progress_row, mode="indeterminate", length=220)
+        self.fit_cancel_button = ttk.Button(self.fit_progress_row, text="Cancel Fit", command=self.cancel_fit_job)
         ttk.Label(width_row, text="Trace").pack(side=tk.LEFT)
         self.line_width_box = ttk.Combobox(
             width_row, textvariable=self.line_width_selector_var,
@@ -892,6 +1005,7 @@ class PretreatmentApp:
         self.event_details = None
         self.event_view_active = False
         self.display_cache.clear()
+        self.fit_cache.clear()
 
     def clear_event_analysis(self, message: str | None = None) -> None:
         """Discard event results when their corrected source signal or marker set changes."""
@@ -1002,6 +1116,84 @@ class PretreatmentApp:
             self.display_cache[key] = self.smooth_array(self.processed[column].to_numpy(float))
         return self.display_cache[key]
 
+    MAX_DISPLAY_POINTS = 6000
+
+    @staticmethod
+    def envelope_indices(values: np.ndarray, max_points: int = 6000) -> np.ndarray:
+        """Keep the local min/max of every bucket so spikes survive downsampling."""
+        length = len(values)
+        if length <= max_points or max_points < 4:
+            return np.arange(length)
+        buckets = max(1, max_points // 2)
+        finite = np.nan_to_num(np.asarray(values, float), nan=0.0, posinf=0.0, neginf=0.0)
+        edges = np.linspace(0, length, buckets + 1).astype(int)
+        picked: list[int] = []
+        for start, stop in zip(edges[:-1], edges[1:]):
+            if stop <= start:
+                continue
+            block = finite[start:stop]
+            low = start + int(np.argmin(block))
+            high = start + int(np.argmax(block))
+            picked.extend((low, high))
+        picked.append(length - 1)
+        return np.unique(np.asarray(picked, dtype=int))
+
+    def plot_display(self, ax: Any, x: np.ndarray, y: np.ndarray, **kwargs: Any) -> Any:
+        """Plot a min/max envelope but remember the full arrays for zoomed-in redraws."""
+        indices = self.envelope_indices(y, self.MAX_DISPLAY_POINTS)
+        line, = ax.plot(x[indices], y[indices], **kwargs)
+        line._full_x = x
+        line._full_y = y
+        return line
+
+    def _decimate_for_view(self, ax: Any) -> None:
+        """Re-plot every display line from the data visible in the current x window."""
+        low, high = sorted(ax.get_xlim())
+        for line in ax.get_lines():
+            full_x = getattr(line, "_full_x", None)
+            if full_x is None:
+                continue
+            full_y = line._full_y
+            if len(full_x) <= self.MAX_DISPLAY_POINTS:
+                line.set_data(full_x, full_y)
+                continue
+            left = max(0, int(np.searchsorted(full_x, low, side="left")) - 1)
+            right = min(len(full_x), int(np.searchsorted(full_x, high, side="right")) + 1)
+            if right <= left:
+                continue
+            window_x, window_y = full_x[left:right], full_y[left:right]
+            if len(window_x) <= self.MAX_DISPLAY_POINTS:
+                line.set_data(window_x, window_y)
+            else:
+                keep = self.envelope_indices(window_y, self.MAX_DISPLAY_POINTS)
+                line.set_data(window_x[keep], window_y[keep])
+
+    def on_xlim_changed(self, ax: Any) -> None:
+        """Keep the plotted envelope matched to what the axis actually shows."""
+        if getattr(self, "_view_decimation_guard", False):
+            return
+        state = getattr(self, "axis_drag_state", None)
+        if state is not None:
+            return  # panning uses the coarse stride; released redraws precisely
+        self._view_decimation_guard = True
+        try:
+            self._decimate_for_view(ax)
+        finally:
+            self._view_decimation_guard = False
+
+    def set_pan_precision(self, full: bool) -> None:
+        """Swap every display line between full data and a coarse stride during panning."""
+        for ax in self.figure.axes:
+            if full:
+                self._decimate_for_view(ax)
+                continue
+            for line in ax.get_lines():
+                data_x = getattr(line, "_full_x", None)
+                if data_x is None:
+                    continue
+                stride = max(1, len(data_x) // 2000)
+                line.set_data(data_x[::stride], line._full_y[::stride])
+
     def display_settings_changed(self) -> None:
         from tkinter import messagebox
         try:
@@ -1051,6 +1243,13 @@ class PretreatmentApp:
 
     def open_folder(self) -> None:
         from tkinter import filedialog, messagebox
+        if self.fit_job is not None and self.fit_job.is_alive():
+            messagebox.showinfo(
+                "Fitting Running",
+                "A correction is still being fitted. Wait for it to finish or press Cancel Fit "
+                "before loading another recording.",
+            )
+            return
         selected = filedialog.askdirectory(title="Select the folder containing Fluorescence.csv")
         if not selected:
             return
@@ -1265,6 +1464,12 @@ class PretreatmentApp:
         from tkinter import messagebox
         if self.data is None:
             return
+        if self.fit_job is not None and self.fit_job.is_alive():
+            messagebox.showinfo("Fitting In Progress", "Wait for the current fit to finish, or cancel it first.")
+            return
+        if self.fit_queue is not None and not self.fit_queue.empty():
+            messagebox.showinfo("Fitting Finishing", "The previous fit is finishing. Try again in a moment.")
+            return
         try:
             config = self.current_config()
             for channel in config.wavelengths:
@@ -1272,19 +1477,112 @@ class PretreatmentApp:
                     raise ValueError(f"Select and confirm fitting regions in the {channel} fitting window first.")
                 if self.fit_signatures[channel] != self.expected_signature(channel, config):
                     raise ValueError(f"The {channel} range, offset, baseline, or fitting model has changed. Reconfirm this channel's fit.")
-            self.vars["status"].set("Fitting..."); self.root.update_idletasks()
-            self.processed, self.details = process_data(self.data, config)
-            self.normalized = False
-            self.clear_event_analysis("Correction updated. Select a marker name and calculate event analysis.")
-            self.refresh_event_signal_list()
-            self.display_cache.clear()
-            self.rebuild_axes(); self.draw_processed()
-            self.vars["status"].set(
-                f"Correction complete: {len(self.processed):,} points. The current display remains unsmoothed and not downsampled. "
-                "Apply display processing from the dF/F0 & Z-score tab if needed."
-            )
         except Exception as exc:
             messagebox.showerror("Processing Failed", str(exc)); self.vars["status"].set(f"Processing failed: {exc}")
+            return
+        self.start_fit_job(config)
+
+    def data_token(self) -> tuple[int, int] | None:
+        if self.data is None:
+            return None
+        return (id(self.data), len(self.data))
+
+    def start_fit_job(self, config: ProcessingConfig) -> None:
+        """Run process_data on a worker thread so the window keeps responding."""
+        self.fit_cancel = threading.Event()
+        result_queue: queue.Queue = queue.Queue()
+        self.fit_queue = result_queue
+        token = self.data_token()
+        worker = threading.Thread(
+            target=self._fit_worker,
+            args=(self.data, config, self.fit_cache, token, self.fit_cancel, result_queue),
+            daemon=True, name="fit-worker",
+        )
+        self.fit_job = worker
+        worker.start()
+        self.show_fit_progress(True)
+        self.vars["status"].set(f"Fitting {len(config.wavelengths)} channel(s) in the background...")
+        self.root.after(120, lambda: self._poll_fit_job(result_queue))
+
+    def _fit_worker(self, data: Any, config: ProcessingConfig, cache: dict[Any, Any],
+                    token: Any, cancel: threading.Event, result_queue: queue.Queue) -> None:
+        try:
+            processed, details = process_data(data, config, cache=cache, data_token=token, cancel=cancel)
+            result_queue.put(("ok", token, (processed, details)))
+        except ProcessingCancelled:
+            result_queue.put(("cancelled", token, None))
+        except Exception as exc:  # noqa: BLE001 - reported in the GUI thread
+            result_queue.put(("error", token, exc))
+
+    def _poll_fit_job(self, result_queue: queue.Queue) -> None:
+        # Each poller watches the queue it was started for. A newer job replaces
+        # self.fit_queue, and this poller then simply stops.
+        if self.fit_queue is not result_queue:
+            return
+        try:
+            status, token, payload = result_queue.get_nowait()
+        except queue.Empty:
+            self.root.after(120, lambda: self._poll_fit_job(result_queue))
+            return
+        self.fit_job = None
+        self.fit_cancel = None
+        self.fit_queue = None
+        self.show_fit_progress(False)
+        if status == "ok":
+            if token != self.data_token():
+                self.vars["status"].set(
+                    "Fitting finished for a different recording; the result was discarded."
+                )
+                return
+            self.processed, self.details = payload
+            self.apply_processed_result()
+        elif status == "cancelled":
+            self.vars["status"].set("Fitting cancelled. The previous correction is unchanged.")
+        else:
+            from tkinter import messagebox
+            messagebox.showerror("Processing Failed", str(payload))
+            self.vars["status"].set(f"Processing failed: {payload}")
+
+    def cancel_fit_job(self) -> None:
+        if self.fit_cancel is not None:
+            self.fit_cancel.set()
+            if self.fit_cancel_button is not None:
+                self.fit_cancel_button.state(["disabled"])
+            self.vars["status"].set("Cancelling after the current channel finishes...")
+
+    def show_fit_progress(self, visible: bool) -> None:
+        import tkinter as tk
+        if self.fit_progress_row is None:
+            return
+        if visible:
+            if not self.fit_progress_row.winfo_manager():
+                self.fit_progress_row.pack(fill=tk.X, pady=(0, 4), before=self.fit_progress_anchor)
+            self.fit_progress_bar.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+            self.fit_cancel_button.pack(side=tk.LEFT)
+            self.fit_cancel_button.state(["!disabled"])
+            self.fit_progress_bar.start(12)
+        else:
+            self.fit_progress_bar.stop()
+            self.fit_progress_bar.pack_forget()
+            self.fit_cancel_button.pack_forget()
+            self.fit_progress_row.pack_forget()
+
+    def apply_processed_result(self) -> None:
+        from tkinter import messagebox
+        self.normalized = False
+        self.clear_event_analysis("Correction updated. Select a marker name and calculate event analysis.")
+        self.refresh_event_signal_list()
+        self.display_cache.clear()
+        try:
+            self.rebuild_axes(); self.draw_processed()
+        except Exception as exc:  # noqa: BLE001 - surfaced instead of a silent traceback
+            messagebox.showerror("Display Failed", str(exc))
+            self.vars["status"].set(f"Correction computed but the display failed: {exc}")
+            return
+        self.vars["status"].set(
+            f"Correction complete: {len(self.processed):,} points. The current display remains unsmoothed and not downsampled. "
+            "Apply display processing from the dF/F0 & Z-score tab if needed."
+        )
 
     def rebuild_axes(self) -> None:
         wavelengths = list(self.available_wavelengths) or [self.analysis_wavelength_var.get()]
@@ -1305,6 +1603,8 @@ class PretreatmentApp:
         self.figure.clear()
         axes = self.figure.subplots(len(keys), 1, sharex=True, squeeze=False).ravel().tolist()
         self.axes, self.axis_keys = axes, keys
+        for axis in axes:
+            axis.callbacks.connect("xlim_changed", self.on_xlim_changed)
         self.refresh_axis_scale_controls()
         self.initialize_hover_artists()
         self.initialize_box_zoom()
@@ -1514,7 +1814,7 @@ class PretreatmentApp:
                 max(0.0, bottom_box.y0 - 58) <= event.y <= bottom_box.y0):
             self.hover_leave()
             self.axis_drag_state = {
-                "kind": "x", "start_pixel": float(event.x),
+                "kind": "x", "start_pixel": float(event.x), "coarse": False,
                 "limits": tuple(float(value) for value in bottom_ax.get_xlim()),
                 "pixels": max(float(bottom_box.width), 1.0),
             }
@@ -1526,7 +1826,7 @@ class PretreatmentApp:
                     box.y0 <= event.y <= box.y1):
                 self.hover_leave()
                 self.axis_drag_state = {
-                    "kind": "y", "key": key, "axis": ax, "start_pixel": float(event.y),
+                    "kind": "y", "key": key, "axis": ax, "start_pixel": float(event.y), "coarse": False,
                     "limits": tuple(float(value) for value in ax.get_ylim()),
                     "pixels": max(float(box.height), 1.0),
                 }
@@ -1537,6 +1837,11 @@ class PretreatmentApp:
         state = self.axis_drag_state
         if state is None:
             return
+        if not state.get("coarse"):
+            # Pan on a coarse copy of every line: full-resolution redraws are
+            # ~0.6 s per frame with 180k points, which makes dragging stutter.
+            self.set_pan_precision(False)
+            state["coarse"] = True
         if state["kind"] == "x" and event.x is not None:
             low, high = state["limits"]
             span = high - low
@@ -1567,7 +1872,11 @@ class PretreatmentApp:
             return
         kind = self.axis_drag_state["kind"]
         key = self.axis_drag_state.get("key")
+        was_coarse = self.axis_drag_state.get("coarse", False)
         self.axis_drag_state = None
+        if was_coarse:
+            self.set_pan_precision(True)
+            self.canvas.draw_idle()
         self.set_canvas_cursor("")
         self.vars["status"].set(
             "Time window panned using the X-axis." if kind == "x" else f"The {key} plot was panned vertically."
@@ -1649,20 +1958,20 @@ class PretreatmentApp:
             ax.clear()
             if key in raw:
                 color = WAVELENGTH_COLORS[key][0]
-                ax.plot(x, raw[key], color=color, lw=self.line_width(f"raw{key}"),
-                        gid=f"raw{key}"); ax.set_ylabel(f"Raw {source} {key}")
+                self.plot_display(ax, x, raw[key], color=color, lw=self.line_width(f"raw{key}"),
+                                  gid=f"raw{key}"); ax.set_ylabel(f"Raw {source} {key}")
             elif key == "ratio":
                 direct = np.full(len(raw[primary]), np.nan, dtype=float)
                 valid = (np.isfinite(raw[primary]) & np.isfinite(raw[reference])
                          & ~np.isclose(raw[reference], 0))
                 np.divide(raw[primary], raw[reference], out=direct, where=valid)
-                ax.plot(x, direct, color="#7B4B94", lw=self.line_width("combined"),
-                        gid="combined")
+                self.plot_display(ax, x, direct, color="#7B4B94", lw=self.line_width("combined"),
+                                  gid="combined")
                 ax.set_ylabel(f"Raw {primary} / {reference}")
             elif key == "subtraction":
                 direct = raw[primary] - raw[reference]
-                ax.plot(x, direct, color="#7B4B94", lw=self.line_width("combined"),
-                        gid="combined")
+                self.plot_display(ax, x, direct, color="#7B4B94", lw=self.line_width("combined"),
+                                  gid="combined")
                 ax.set_ylabel(f"Raw {primary} - {reference}")
             else:
                 ax.text(0.5, 0.5, "Apply fitting to display combined trace", ha="center", va="center", transform=ax.transAxes)
@@ -1686,49 +1995,49 @@ class PretreatmentApp:
             if key in self.available_wavelengths:
                 raw_color, corrected_color = WAVELENGTH_COLORS[key]
                 if view != "corrected_only":
-                    ax.plot(x, self.display_values(f"offset_adjusted_{key}")[indices], color=raw_color,
+                    self.plot_display(ax, x, self.display_values(f"offset_adjusted_{key}")[indices], color=raw_color,
                             lw=self.line_width(f"raw{key}"), alpha=0.72,
                             label=f"Original {key} after offset", gid=f"raw{key}")
                 if self.show_fit_var.get():
-                    ax.plot(x, d[f"fit_{key}"].to_numpy()[indices], color="#D62728", ls="--",
+                    self.plot_display(ax, x, d[f"fit_{key}"].to_numpy()[indices], color="#D62728", ls="--",
                             lw=self.line_width(f"fit{key}"), label=f"{key} fit", gid=f"fit{key}")
                 if view != "raw_only":
-                    ax.plot(x, self.display_values(f"corrected_{key}")[indices], color=corrected_color,
+                    self.plot_display(ax, x, self.display_values(f"corrected_{key}")[indices], color=corrected_color,
                             lw=self.line_width(f"corrected{key}"), label=f"Corrected {key}",
                             gid=f"corrected{key}")
                 ax.set_ylabel(f"{key} fluorescence")
                 ax.legend(frameon=False, ncol=3, loc="lower right", bbox_to_anchor=(1, 1.01),
                           borderaxespad=0, fontsize=8)
             elif key == "ratio":
-                ax.plot(x, self.display_values("combined_signal")[indices], color="#7B4B94",
+                self.plot_display(ax, x, self.display_values("combined_signal")[indices], color="#7B4B94",
                         lw=self.line_width("combined"), gid="combined")
                 ax.set_ylabel(self.details.get("combined_label") or "Corrected ratio")
             elif key == "subtraction":
-                ax.plot(x, self.display_values("combined_signal")[indices], color="#7B4B94",
+                self.plot_display(ax, x, self.display_values("combined_signal")[indices], color="#7B4B94",
                         lw=self.line_width("combined"), gid="combined")
                 ax.set_ylabel(self.details.get("combined_label") or "Corrected subtraction")
             elif key == "dff":
-                ax.plot(x, self.display_values("dff_percent")[indices], color="#7B4B94",
+                self.plot_display(ax, x, self.display_values("dff_percent")[indices], color="#7B4B94",
                         lw=self.line_width("dff"), gid="dff")
                 ax.axhline(0, color="#777777", lw=0.7, alpha=0.7)
                 ax.set_ylabel("dF/F0 (%)")
                 self.shade_normalization_baseline(ax)
             elif key.startswith("dff") and key[3:] in self.available_wavelengths:
                 wavelength = key[3:]
-                ax.plot(x, self.display_values(f"dff_{wavelength}_percent")[indices],
+                self.plot_display(ax, x, self.display_values(f"dff_{wavelength}_percent")[indices],
                         color=WAVELENGTH_COLORS[wavelength][1], lw=self.line_width("dff"), gid="dff")
                 ax.axhline(0, color="#777777", lw=0.7, alpha=0.7)
                 ax.set_ylabel(f"{wavelength} dF/F0 (%)")
                 self.shade_normalization_baseline(ax)
             elif key == "zscore":
-                ax.plot(x, self.display_values("zscore")[indices], color="#7B4B94",
+                self.plot_display(ax, x, self.display_values("zscore")[indices], color="#7B4B94",
                         lw=self.line_width("zscore"), gid="zscore")
                 ax.axhline(0, color="#777777", lw=0.7, alpha=0.7)
                 ax.set_ylabel("Z-score")
                 self.shade_normalization_baseline(ax)
             elif key.startswith("zscore") and key[6:] in self.available_wavelengths:
                 wavelength = key[6:]
-                ax.plot(x, self.display_values(f"zscore_{wavelength}")[indices],
+                self.plot_display(ax, x, self.display_values(f"zscore_{wavelength}")[indices],
                         color=WAVELENGTH_COLORS[wavelength][1], lw=self.line_width("zscore"), gid="zscore")
                 ax.axhline(0, color="#777777", lw=0.7, alpha=0.7)
                 ax.set_ylabel(f"{wavelength} Z-score")
@@ -1796,11 +2105,20 @@ class PretreatmentApp:
         zero_time = None
         if self.normalized and self.details and self.details.get("normalization"):
             zero_time = self.details["normalization"].get("zero_time_min")
+        if not self.markers:
+            return
+        offset = float(zero_time) if zero_time is not None else 0.0
+        groups: dict[tuple[str, str], list[float]] = {}
         for marker in self.markers:
             color, style = ("#777777", ":") if marker["source"] == "original" else ("#C65D3B", "-")
-            display_time = float(marker["time_min"]) - (float(zero_time) if zero_time is not None else 0.0)
-            for ax in self.axes:
-                ax.axvline(display_time, color=color, ls=style, lw=1.0)
+            groups.setdefault((color, style), []).append(float(marker["time_min"]) - offset)
+        for ax in self.axes:
+            for (color, style), times in groups.items():
+                ax.vlines(times, 0, 1, transform=ax.get_xaxis_transform(), color=color,
+                          linestyles=style, linewidth=1.0, zorder=2.5)
+        for marker in self.markers:
+            color, style = ("#777777", ":") if marker["source"] == "original" else ("#C65D3B", "-")
+            display_time = float(marker["time_min"]) - offset
             self.axes[0].annotate(marker["name"], xy=(display_time, 1), xycoords=("data", "axes fraction"),
                                   xytext=(2, -2), textcoords="offset points", rotation=90, va="top", fontsize=8, color=color)
 
