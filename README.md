@@ -8,9 +8,16 @@ modified.
 
 ## Requirements and setup
 
-- A Python 3 installation.
+- A Python 3 installation, or Anaconda on Windows.
 - `pip install -r requirements.txt` (`matplotlib`, `numpy`, `pandas`, `scipy`).
-- Start the program with `run_RWD_fiber_pretreatment.bat` or `python app.py`.
+- Start the program with `run_RWD_fiber_pretreatment.bat`, or run `python app.py` directly
+  with a prepared environment.
+- On Windows the launcher self-checks the environment: it locates Anaconda, creates the
+  `aaplot` conda environment (Python 3.12) when missing, verifies every package listed in
+  `requirements.txt` through `env_check.py`, installs whatever is missing into that env with
+  `pip`, and then starts `app.py` with the env's own interpreter. `--no-install` only reports
+  the check result, `--recreate` deletes and rebuilds the environment, and
+  `AAPLOT_NO_PAUSE=1` skips the final pause for automation.
 
 ## Input folder
 
@@ -193,6 +200,10 @@ Original input files are read-only and are never modified.
   per-trial dF/F0 columns, one empty separator column, then the per-trial Z-score columns.
 - Added per-marker overlayed trial figures (`event_trials_<marker>.png`) and per-marker
   heatmaps (`event_heatmap_<marker>.png`).
+- Added a Windows launcher self-check. `run_RWD_fiber_pretreatment.bat` now locates Anaconda,
+  creates or reuses the `aaplot` conda environment, validates `requirements.txt` with the new
+  `env_check.py`, installs missing packages with `pip`, and starts `app.py` with that
+  environment's interpreter; `--no-install` only checks and `--recreate` rebuilds the env.
 
 ## Author and development
 
