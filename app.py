@@ -2,12 +2,14 @@
 """Interactive GUI for independent 410/470/560 fiber-photometry pretreatment."""
 from __future__ import annotations
 
+import copy
 import json
 import math
 import queue
 import re
 import sys
 import threading
+import time
 import uuid
 from dataclasses import asdict
 from pathlib import Path
@@ -22,8 +24,16 @@ from processing import (
     available_recording_channels,
     calculate_event_locked_traces,
     calculate_normalized_traces,
+    changed_fit_channels,
     combine_channels,
+    compare_configs,
+    config_from_saved,
+    estimate_reference_weight,
+    find_saved_analysis,
     fit_bleaching,
+    fit_cache_key,
+    fitted_curve_from_parameters,
+    SAVED_ANALYSIS_FILE,
     load_recording,
     process_data,
     region_mask,
@@ -543,7 +553,11 @@ class PretreatmentApp:
         self.initial_y_limits: dict[str, tuple[float, float]] = {}
         self.display_cache: dict[tuple[str, float], np.ndarray] = {}
         self.fit_cache: dict[Any, Any] = {}
+        self.saved_analyses: list[dict[str, Any]] = []
+        self.saved_baseline: dict[str, Any] | None = None
+        self.last_applied_config: ProcessingConfig | None = None
         self.fit_job: threading.Thread | None = None
+        self.pending_config: ProcessingConfig | None = None
         self.fit_cancel: threading.Event | None = None
         self.fit_queue: queue.Queue | None = None
         self.fit_progress_row: Any = None
@@ -650,6 +664,9 @@ class PretreatmentApp:
         row = 0
         ttk.Button(data_tab, text="Select Recording Folder", command=self.open_folder, style="Accent.TButton").grid(row=row, column=0, columnspan=2, sticky="ew"); row += 1
         ttk.Label(data_tab, textvariable=self.vars["folder"], wraplength=350).grid(row=row, column=0, columnspan=2, sticky="w", pady=(3, 9)); row += 1
+        self.reuse_button = ttk.Button(data_tab, text="Reuse Saved Analysis...", command=self.open_saved_analysis,
+                                       state="disabled")
+        self.reuse_button.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(0, 6)); row += 1
         ttk.Label(data_tab, text="Recording Channel").grid(row=row, column=0, sticky="w")
         self.source_channel_box = ttk.Combobox(data_tab, textvariable=self.source_channel_var,
                                                values=["CH1"], state="readonly", width=19)
@@ -1050,6 +1067,11 @@ class PretreatmentApp:
         self.event_view_active = False
         self.display_cache.clear()
         self.fit_cache.clear()
+        self.last_applied_config = None
+        self.saved_baseline = None
+        self.saved_analyses = []
+        if hasattr(self, "reuse_button"):
+            self.reuse_button.configure(state="disabled")
 
     def clear_event_analysis(self, message: str | None = None) -> None:
         """Discard event results when their corrected source signal or marker set changes."""
@@ -1327,12 +1349,305 @@ class PretreatmentApp:
             self.vars["norm_end"].set(f"{min(1.0, recording_end):.5f}")
             self.vars["output_name"].set(f"output_{self.folder.name}_{self.source_channel_var.get()}")
             self.refresh_markers(); self.analysis_selection_changed()
-            self.vars["status"].set(
-                f"Data loaded with wavelengths {', '.join(self.available_wavelengths)}. "
-                "Enter each visible baseline and set its fitting regions."
-            )
+            saved = self.refresh_saved_analysis()
+            if saved:
+                path = Path(saved[0]["_path"])
+                self.vars["status"].set(
+                    f"Data loaded with wavelengths {', '.join(self.available_wavelengths)}. "
+                    f"An earlier analysis was found ({path.parent.name}, "
+                    f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(path.stat().st_mtime))}). "
+                    "Click Reuse Saved Analysis to compare and restore it."
+                )
+            else:
+                self.vars["status"].set(
+                    f"Data loaded with wavelengths {', '.join(self.available_wavelengths)}. "
+                    "Enter each visible baseline and set its fitting regions."
+                )
         except Exception as exc:
             messagebox.showerror("Load Failed", str(exc))
+
+    def refresh_saved_analysis(self) -> list[dict[str, Any]]:
+        """Find exported analyses under the current recording folder."""
+        self.saved_analyses = []
+        if self.folder is not None:
+            try:
+                self.saved_analyses = find_saved_analysis(self.folder)
+            except Exception:  # noqa: BLE001 - a broken file must not block loading
+                self.saved_analyses = []
+        if hasattr(self, "reuse_button"):
+            self.reuse_button.configure(state="normal" if self.saved_analyses else "disabled")
+        return self.saved_analyses
+
+    def parsed_number(self, key: str, default: Any = None) -> Any:
+        text = self.vars[key].get().strip()
+        if not text:
+            return default
+        try:
+            value = float(text)
+        except ValueError:
+            return default
+        return value if math.isfinite(value) else default
+
+    def current_config_snapshot(self) -> ProcessingConfig:
+        """Best-effort current settings, used for the comparison table.
+
+        Unlike ``current_config`` this never raises, so the dialog still works
+        before every field has been filled in.
+        """
+        wavelengths = list(self.available_wavelengths) or ["470"]
+        reference = self.reference_wavelength_var.get()
+        return ProcessingConfig(
+            range_start_min=self.parsed_number("range_start", 0.0),
+            range_end_min=self.parsed_number("range_end", 1.0),
+            offsets={value: self.parsed_number(f"offset{value}", 0.0) for value in wavelengths},
+            baselines={value: self.parsed_number(f"baseline{value}", 0.0) for value in wavelengths},
+            wavelengths=wavelengths,
+            analysis_wavelength=self.analysis_wavelength_var.get(),
+            reference_wavelength=None if reference in {"", "None"} else reference,
+            combine=self.vars["combine"].get(),
+            reference_weight=self.parsed_number("reference_weight"),
+            fit_model=self.vars["fit_model"].get(),
+            smooth_seconds=(self.parsed_number("smooth", 0.0) if self.smooth_enabled_var.get() else 0.0),
+            fit_regions={value: list(self.fit_regions[value]) for value in wavelengths},
+            fit_models={value: self.fit_models[value] for value in wavelengths},
+            fit_baseline_modes={value: self.fit_baseline_modes[value] for value in wavelengths},
+            source_channel=self.source_channel_var.get(),
+        )
+
+    def open_saved_analysis(self) -> None:
+        import tkinter as tk
+        from tkinter import messagebox, ttk
+        if not self.saved_analyses:
+            messagebox.showinfo(
+                "No Saved Analysis",
+                f"No {SAVED_ANALYSIS_FILE} was found under this recording folder.",
+            )
+            return
+        window = tk.Toplevel(self.root)
+        window.title("Reuse Saved Analysis")
+        window.geometry("860x560")
+        window.transient(self.root)
+        frame = ttk.Frame(window, padding=10)
+        frame.pack(fill="both", expand=True)
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(4, weight=1)
+
+        if len(self.saved_analyses) > 1:
+            choices = [
+                f"{Path(item['_path']).parent.name}  |  "
+                f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(Path(item['_path']).stat().st_mtime))}"
+                for item in self.saved_analyses
+            ]
+            selector = ttk.Combobox(frame, values=choices, state="readonly")
+            selector.current(0)
+            selector.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        else:
+            selector = None
+
+        path_label = ttk.Label(frame, text="", wraplength=820, justify="left")
+        path_label.grid(row=1, column=0, sticky="w")
+        summary_label = ttk.Label(frame, text="", wraplength=820, justify="left")
+        summary_label.grid(row=2, column=0, sticky="w", pady=(4, 8))
+        header = ttk.Label(
+            frame,
+            text="Parameters that differ from the current settings. Initialising overwrites "
+                 "the current values; unchanged channels keep their saved fit.",
+            wraplength=820, justify="left",
+        )
+        header.grid(row=3, column=0, sticky="w", pady=(0, 4))
+
+        table = ttk.Treeview(frame, columns=("scope", "parameter", "saved", "current"),
+                             show="headings", height=14)
+        for name, width in (("scope", 80), ("parameter", 200), ("saved", 250), ("current", 250)):
+            table.heading(name, text=name.capitalize())
+            table.column(name, width=width, anchor="w")
+        table.grid(row=4, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=table.yview)
+        scrollbar.grid(row=4, column=1, sticky="ns")
+        table.configure(yscrollcommand=scrollbar.set)
+
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        apply_button = ttk.Button(buttons, text="Initialise From Saved", style="Accent.TButton")
+        apply_button.pack(side="left")
+        ttk.Button(buttons, text="Close", command=window.destroy).pack(side="right")
+
+        def show(index: int) -> None:
+            payload = self.saved_analyses[index]
+            path = Path(payload["_path"])
+            path_label.configure(text=f"Source: {path}")
+            try:
+                rows = compare_configs(payload["_config"], self.current_config_snapshot())
+            except Exception as exc:  # noqa: BLE001
+                rows = []
+                summary_label.configure(text=f"The saved parameters could not be compared: {exc}")
+            table.delete(*table.get_children())
+            for row in rows:
+                table.insert("", "end", values=(row["scope"], row["parameter"],
+                                                row["saved"], row["current"]))
+            channels = sorted(changed_fit_channels(payload["_config"], self.current_config_snapshot()))
+            details = payload.get("fit_details") or {}
+            reusable = [channel for channel in payload["_config"].wavelengths
+                        if isinstance((details.get("fit_parameters") or {}).get(channel), dict)]
+            summary_label.configure(
+                text=(f"{len(rows)} difference(s). Saved fits available for "
+                      f"{', '.join(reusable) if reusable else 'no channel'}"
+                      + (f"; channels that would need a refit: {', '.join(channels)}" if channels else
+                         "; every channel can reuse its saved fit.")
+                      + (" No differences: the current settings already match this analysis."
+                         if not rows else ""))
+            )
+
+        def on_select(_event: Any = None) -> None:
+            show(selector.current() if selector is not None else 0)
+
+        if selector is not None:
+            selector.bind("<<ComboboxSelected>>", on_select)
+        apply_button.configure(
+            command=lambda: (self.initialize_from_saved(
+                self.saved_analyses[selector.current() if selector is not None else 0]), window.destroy())
+        )
+        show(0)
+
+    def restore_saved_markers(self, edits: dict[str, Any]) -> None:
+        """Re-apply the marker edits recorded with a saved analysis."""
+        deleted = {str(marker.get("id")) for marker in edits.get("deleted_original_markers") or []}
+        restored = [dict(marker) for marker in self.original_markers if str(marker["id"]) not in deleted]
+        for marker in edits.get("manual_markers") or []:
+            if not isinstance(marker, dict) or "time_min" not in marker:
+                continue
+            restored.append({
+                "id": str(marker.get("id") or uuid.uuid4()),
+                "time_min": float(marker["time_min"]),
+                "name": str(marker.get("name", "marker")),
+                "source": "manual",
+            })
+        self.markers = sorted(restored, key=lambda item: item["time_min"])
+        self.refresh_markers()
+
+    def seed_saved_fits(self, payload: dict[str, Any]) -> tuple[list[str], list[str]]:
+        """Put saved fitted curves into the fit cache under the current data token.
+
+        Returns the channels that were seeded and the ones that could not be.
+        """
+        details = payload.get("fit_details") or {}
+        saved_parameters = details.get("fit_parameters") or {}
+        if self.data is None:
+            return [], []
+        try:
+            config = self.current_config()
+        except Exception:  # noqa: BLE001
+            return [], []
+        subset = select_effective_data(self.data, config)
+        time_s = subset["TimeStamp"].to_numpy(float) / 1000
+        token = self.data_token()
+        source = config.source_channel
+        seeded: list[str] = []
+        skipped: list[str] = []
+        for channel in config.wavelengths:
+            parameters = saved_parameters.get(channel)
+            if not isinstance(parameters, dict):
+                skipped.append(channel)
+                continue
+            model = config.fit_models.get(channel) or config.fit_model
+            if parameters.get("model") != model:
+                skipped.append(channel)
+                continue
+            try:
+                fitted = fitted_curve_from_parameters(parameters, time_s)
+            except Exception:  # noqa: BLE001 - fall back to a fresh fit
+                skipped.append(channel)
+                continue
+            if fitted.shape != time_s.shape or not np.all(np.isfinite(fitted)):
+                skipped.append(channel)
+                continue
+            baseline_mode = config.fit_baseline_modes.get(channel) or "fit_constant"
+            key = fit_cache_key(
+                token, source, f"{source}-{channel}", model, baseline_mode,
+                float(config.offsets[channel]), float(config.baselines[channel]),
+                [tuple(region) for region in config.fit_regions.get(channel) or []],
+                config.range_start_min, config.range_end_min,
+            )
+            stored = copy.deepcopy(parameters)
+            stored["model"] = model
+            stored["baseline_mode"] = baseline_mode
+            self.fit_cache[key] = (np.array(fitted, float), stored)
+            self.fit_signatures[channel] = self.expected_signature(channel, config)
+            seeded.append(channel)
+        return seeded, skipped
+
+    def initialize_from_saved(self, payload: dict[str, Any]) -> None:
+        from tkinter import messagebox
+        config = payload.get("_config")
+        if not isinstance(config, ProcessingConfig):
+            messagebox.showerror("Cannot Initialise", "The selected file has no usable parameters.")
+            return
+        try:
+            source = config.source_channel if config.source_channel in self.recording_channels else self.active_source_channel
+            if source != self.source_channel_var.get():
+                self.source_channel_var.set(source)
+                self.active_source_channel = source
+                self.configure_available_wavelengths(source)
+            self.vars["range_start"].set(f"{config.range_start_min:g}")
+            self.vars["range_end"].set(f"{config.range_end_min:g}")
+            for channel in self.available_wavelengths:
+                self.vars[f"offset{channel}"].set(f"{config.offsets.get(channel, 0.0):g}")
+                self.vars[f"baseline{channel}"].set(f"{config.baselines.get(channel, 0.0):g}")
+                self.fit_regions[channel] = [tuple(region) for region in config.fit_regions.get(channel) or []]
+                self.fit_models[channel] = config.fit_models.get(channel) or config.fit_model
+                self.fit_baseline_modes[channel] = config.fit_baseline_modes.get(channel) or "fit_constant"
+                self.vars[f"fit{channel}_status"].set(
+                    f"{len(self.fit_regions[channel])} region(s) | {self.fit_models[channel]} | "
+                    f"{self.fit_baseline_modes[channel]} (restored)"
+                )
+            if config.analysis_wavelength in self.available_wavelengths:
+                self.analysis_wavelength_var.set(config.analysis_wavelength)
+            reference = config.reference_wavelength
+            if reference is None:
+                self.reference_wavelength_var.set("None")
+            elif reference in self.available_wavelengths and reference != config.analysis_wavelength:
+                self.reference_wavelength_var.set(reference)
+            self.vars["combine"].set(config.combine)
+            self.vars["reference_weight"].set("" if config.reference_weight is None
+                                              else f"{config.reference_weight:g}")
+            self.vars["fit_model"].set(config.fit_model)
+            if config.smooth_seconds > 0:
+                self.smooth_enabled_var.set(True)
+                self.vars["smooth"].set(f"{config.smooth_seconds:g}")
+            else:
+                self.smooth_enabled_var.set(False)
+
+            normalization = (payload.get("fit_details") or {}).get("normalization") or {}
+            if normalization:
+                if normalization.get("baseline_start_min") is not None:
+                    self.vars["norm_start"].set(f"{float(normalization['baseline_start_min']):g}")
+                if normalization.get("baseline_end_min") is not None:
+                    self.vars["norm_end"].set(f"{float(normalization['baseline_end_min']):g}")
+                self.norm_mode_var.set("manual")
+
+            self.restore_saved_markers(payload.get("marker_edits") or {})
+            self.vars["output_name"].set(Path(payload["_path"]).parent.name)
+            seeded, skipped = self.seed_saved_fits(payload)
+            self.saved_baseline = {"config": config, "path": payload["_path"]}
+            self.last_applied_config = None
+            self.processed = None
+            self.details = None
+            self.normalized = False
+            self.display_cache.clear()
+            self.combine_changed()
+            self.rebuild_axes()
+            if self.data is not None:
+                self.draw_raw_preview()
+            message = (
+                f"Restored the saved configuration from {Path(payload['_path']).parent.name}. "
+                f"Reusable fits: {', '.join(seeded) if seeded else 'none'}"
+                + (f"; refit needed for {', '.join(skipped)}" if skipped else "")
+                + ". Click Apply Correction."
+            )
+            self.vars["status"].set(message)
+            messagebox.showinfo("Configuration Restored", message)
+        except Exception as exc:  # noqa: BLE001 - reported to the user
+            messagebox.showerror("Initialise Failed", str(exc))
 
     def configure_available_wavelengths(self, source: str) -> None:
         self.available_wavelengths = list(self.recording_channels.get(source, []))
@@ -1474,6 +1789,7 @@ class PretreatmentApp:
         self.processed = None
         self.details = None
         self.normalized = False
+        self.last_applied_config = None
         self.clear_event_analysis("Apply correction for this recording channel before event analysis.")
         self.display_cache.clear()
         self.fit_regions = {wavelength: [] for wavelength in WAVELENGTHS}
@@ -1532,6 +1848,15 @@ class PretreatmentApp:
             return
         self.start_fit_job(config)
 
+    def incremental_scope(self, config: ProcessingConfig) -> tuple[list[str], list[str]]:
+        """Channels that must be fitted again and channels that can reuse a fit."""
+        previous = self.last_applied_config
+        if previous is None:
+            return list(config.wavelengths), []
+        changed = changed_fit_channels(previous, config) & set(config.wavelengths)
+        reused = [channel for channel in config.wavelengths if channel not in changed]
+        return sorted(changed), reused
+
     def data_token(self) -> tuple[int, int] | None:
         if self.data is None:
             return None
@@ -1542,7 +1867,9 @@ class PretreatmentApp:
         self.fit_cancel = threading.Event()
         result_queue: queue.Queue = queue.Queue()
         self.fit_queue = result_queue
+        self.pending_config = config
         token = self.data_token()
+        refit, reused = self.incremental_scope(config)
         worker = threading.Thread(
             target=self._fit_worker,
             args=(self.data, config, self.fit_cache, token, self.fit_cancel, result_queue),
@@ -1551,7 +1878,13 @@ class PretreatmentApp:
         self.fit_job = worker
         worker.start()
         self.show_fit_progress(True)
-        self.vars["status"].set(f"Fitting {len(config.wavelengths)} channel(s) in the background...")
+        if reused:
+            self.vars["status"].set(
+                f"Refitting {', '.join(refit) if refit else 'nothing'}; reusing the fitted curve for "
+                f"{', '.join(reused)}..."
+            )
+        else:
+            self.vars["status"].set(f"Fitting {len(config.wavelengths)} channel(s) in the background...")
         self.root.after(120, lambda: self._poll_fit_job(result_queue))
 
     def _fit_worker(self, data: Any, config: ProcessingConfig, cache: dict[Any, Any],
@@ -1619,6 +1952,8 @@ class PretreatmentApp:
 
     def apply_processed_result(self) -> None:
         from tkinter import messagebox
+        self.last_applied_config = self.pending_config
+        self.pending_config = None
         self.normalized = False
         self.clear_event_analysis("Correction updated. Select a marker name and calculate event analysis.")
         self.refresh_event_signal_list()
@@ -1629,9 +1964,17 @@ class PretreatmentApp:
             messagebox.showerror("Display Failed", str(exc))
             self.vars["status"].set(f"Correction computed but the display failed: {exc}")
             return
+        reused = [channel for channel, parameters in (self.details or {}).get("fit_parameters", {}).items()
+                  if parameters.get("fit_reused_from_cache")]
+        refitted = [channel for channel, parameters in (self.details or {}).get("fit_parameters", {}).items()
+                    if not parameters.get("fit_reused_from_cache")]
+        scope = ""
+        if reused:
+            scope = (f" Reused the saved fit for {', '.join(sorted(reused))}"
+                     + (f"; refitted {', '.join(sorted(refitted))}." if refitted else "."))
         self.vars["status"].set(
-            f"Correction complete: {len(self.processed):,} points. The current display remains unsmoothed and not downsampled. "
-            "Apply display processing from the Full trace analysis tab if needed."
+            f"Correction complete: {len(self.processed):,} points.{scope} The current display remains "
+            "unsmoothed and not downsampled. Apply display processing from the Full trace analysis tab if needed."
         )
 
     def rebuild_axes(self) -> None:

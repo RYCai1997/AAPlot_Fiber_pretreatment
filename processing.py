@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import os
 import uuid
 import re
@@ -537,6 +538,24 @@ def select_effective_data(data: pd.DataFrame, config: ProcessingConfig) -> pd.Da
     return data.loc[use].reset_index(drop=True)
 
 
+def fit_cache_key(
+    data_token: Any,
+    source: str,
+    column: str,
+    model: str,
+    baseline_mode: str,
+    offset: float,
+    baseline: float,
+    regions: Any,
+    range_start_min: float,
+    range_end_min: float,
+) -> tuple[Any, ...]:
+    """Signature of one channel fit. Two runs share a fit only when it matches."""
+    return (data_token, source, column, model, baseline_mode, offset, baseline,
+            tuple(tuple(region) for region in regions),
+            float(range_start_min), float(range_end_min))
+
+
 def process_data(
     data: pd.DataFrame,
     config: ProcessingConfig,
@@ -585,13 +604,15 @@ def process_data(
         mask = region_mask(time_min, regions)
         model = config.fit_models.get(wavelength) or config.fit_model
         baseline_mode = config.fit_baseline_modes.get(wavelength) or "fit_constant"
-        cache_key = (data_token, source, column, model, baseline_mode, offset, baseline,
-                     tuple(regions), float(config.range_start_min), float(config.range_end_min))
+        cache_key = fit_cache_key(data_token, source, column, model, baseline_mode, offset, baseline,
+                                  regions, config.range_start_min, config.range_end_min)
         cached = cache.get(cache_key) if cache is not None else None
         if cached is not None:
             fitted, parameters = cached[0], copy.deepcopy(cached[1])
+            parameters["fit_reused_from_cache"] = True
         else:
             fitted, parameters = fit_bleaching(time_s, adjusted, baseline, model, mask, baseline_mode)
+            parameters["fit_reused_from_cache"] = False
             if cache is not None:
                 if len(cache) >= 12:
                     cache.clear()
@@ -934,3 +955,186 @@ def calculate_event_locked_traces(
         "normalization": "each trial uses its own pre-marker baseline",
     }
     return trials, average, details
+
+
+# --- Reusing a previous analysis -------------------------------------------
+
+SAVED_ANALYSIS_FILE = "parameters_and_marker_edits.json"
+# Sampling jitter between two exports must not be reported as a parameter change.
+RANGE_TOLERANCE_MIN = 1e-3
+
+
+def _as_float(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if np.isfinite(number) else None
+
+
+def _with_default(value: Any, default: float) -> float:
+    number = _as_float(value)
+    return default if number is None else number
+
+
+def _regions_from_saved(raw: Any) -> list[tuple[float, float]]:
+    regions: list[tuple[float, float]] = []
+    for region in raw or []:
+        try:
+            start, end = float(region[0]), float(region[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        regions.append((start, end))
+    return regions
+
+
+def config_from_saved(payload: dict[str, Any]) -> ProcessingConfig:
+    """Rebuild a ProcessingConfig from an exported parameters file.
+
+    Missing keys fall back to the dataclass defaults, so files written by older
+    versions still initialise.
+    """
+    processing = payload.get("processing") or {}
+    if not isinstance(processing, dict):
+        raise ValueError("The saved parameters file has no processing block.")
+    default = ProcessingConfig(range_start_min=0.0, range_end_min=1.0)
+    wavelengths = [str(value) for value in processing.get("wavelengths") or [] if str(value) in SUPPORTED_WAVELENGTHS]
+    offsets = {value: _as_float(processing.get("offsets", {}).get(value)) for value in SUPPORTED_WAVELENGTHS}
+    baselines = {value: _as_float(processing.get("baselines", {}).get(value)) for value in SUPPORTED_WAVELENGTHS}
+    reference = processing.get("reference_wavelength", default.reference_wavelength)
+    weight = processing.get("reference_weight")
+    return ProcessingConfig(
+        range_start_min=_with_default(processing.get("range_start_min"), 0.0),
+        range_end_min=_with_default(processing.get("range_end_min"), 1.0),
+        offsets={key: (value if value is not None else 0.0) for key, value in offsets.items()},
+        baselines={key: (value if value is not None else 0.0) for key, value in baselines.items()},
+        wavelengths=wavelengths,
+        analysis_wavelength=str(processing.get("analysis_wavelength") or default.analysis_wavelength),
+        reference_wavelength=None if reference in (None, "", "None") else str(reference),
+        combine=str(processing.get("combine") or default.combine),
+        reference_weight=_as_float(weight),
+        fit_model=str(processing.get("fit_model") or default.fit_model),
+        smooth_seconds=_with_default(processing.get("smooth_seconds"), 0.0),
+        fit_regions={key: _regions_from_saved(value)
+                     for key, value in (processing.get("fit_regions") or {}).items()},
+        fit_models={key: value for key, value in (processing.get("fit_models") or {}).items()},
+        fit_baseline_modes={key: value for key, value in (processing.get("fit_baseline_modes") or {}).items()},
+        source_channel=str(processing.get("source_channel") or default.source_channel),
+    )
+
+
+def fitted_curve_from_parameters(parameters: dict[str, Any], time_s: np.ndarray) -> np.ndarray:
+    """Evaluate a saved fit on the current time axis, so a fit can be reused as is."""
+    x = np.asarray(time_s, float)
+    x = x - x[0]
+    model = parameters.get("model")
+    constant = parameters.get("fitted_constant")
+    if constant is None:
+        constant = parameters.get("fixed_baseline", 0.0)
+    constant = float(constant)
+    if model == "linear":
+        return constant + float(parameters["slope_per_s"]) * x
+    if model == "single_exponential":
+        return constant + float(parameters["amplitude"]) * np.exp(-x / float(parameters["tau_s"]))
+    if model == "double_exponential":
+        return (constant
+                + float(parameters["amplitude_1"]) * np.exp(-x / float(parameters["tau_1_s"]))
+                + float(parameters["amplitude_2"]) * np.exp(-x / float(parameters["tau_2_s"])))
+    raise ValueError(f"The saved fit uses an unknown model: {model}")
+
+
+def load_saved_analysis(path: Path) -> dict[str, Any]:
+    """Read one exported parameters file and add the values used for comparison."""
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(payload, dict) or not isinstance(payload.get("processing"), dict):
+        raise ValueError(f"{Path(path).name} is not an exported parameters file.")
+    payload["_path"] = str(Path(path))
+    payload["_config"] = config_from_saved(payload)
+    return payload
+
+
+def find_saved_analysis(folder: Path) -> list[dict[str, Any]]:
+    """Every re-usable analysis under a recording folder, most recent first."""
+    folder = Path(folder)
+    candidates = [folder / SAVED_ANALYSIS_FILE]
+    candidates += sorted(folder.glob(f"*/{SAVED_ANALYSIS_FILE}"))
+    found: list[dict[str, Any]] = []
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            found.append(load_saved_analysis(path))
+        except Exception:
+            continue
+    found.sort(key=lambda item: Path(item["_path"]).stat().st_mtime, reverse=True)
+    return found
+
+
+def _describe_regions(regions: Any) -> str:
+    pairs = [tuple(float(value) for value in region) for region in regions or []]
+    return "; ".join(f"{start:g}-{end:g}" for start, end in pairs) if pairs else "none"
+
+
+def compare_configs(
+    saved: ProcessingConfig,
+    current: ProcessingConfig,
+) -> list[dict[str, Any]]:
+    """Differences between a saved configuration and the current one.
+
+    Every entry is ``{"scope", "parameter", "saved", "current"}``; ``scope`` is
+    ``"global"`` or a wavelength. Per-channel rows are the ones that decide
+    whether that channel has to be fitted again.
+    """
+    rows: list[dict[str, Any]] = []
+
+    # The data range is compared numerically: the recorded end is a sampled
+    # timestamp, so "0-10 min" and "0-9.99944 min" are the same interval.
+    if (abs(saved.range_start_min - current.range_start_min) > RANGE_TOLERANCE_MIN
+            or abs(saved.range_end_min - current.range_end_min) > RANGE_TOLERANCE_MIN):
+        rows.append({
+            "scope": "global", "parameter": "data range",
+            "saved": f"{saved.range_start_min:g}-{saved.range_end_min:g} min",
+            "current": f"{current.range_start_min:g}-{current.range_end_min:g} min",
+        })
+
+    def add(scope: str, parameter: str, saved_value: Any, current_value: Any) -> None:
+        if saved_value == current_value:
+            return
+        if isinstance(saved_value, float) and isinstance(current_value, float):
+            if abs(saved_value - current_value) <= 1e-9 * max(1.0, abs(saved_value)):
+                return
+        rows.append({"scope": scope, "parameter": parameter,
+                     "saved": saved_value, "current": current_value})
+
+    add("global", "wavelengths", ", ".join(saved.wavelengths), ", ".join(current.wavelengths))
+    add("global", "analysis wavelength", saved.analysis_wavelength, current.analysis_wavelength)
+    add("global", "reference wavelength", saved.reference_wavelength or "None",
+        current.reference_wavelength or "None")
+    add("global", "combine", saved.combine, current.combine)
+    add("global", "reference weight", saved.reference_weight, current.reference_weight)
+    add("global", "default fit model", saved.fit_model, current.fit_model)
+    add("global", "smoothing (s)", float(saved.smooth_seconds), float(current.smooth_seconds))
+    add("global", "source channel", saved.source_channel, current.source_channel)
+
+    for channel in sorted(set(saved.wavelengths) | set(current.wavelengths)):
+        add(channel, "offset", float(saved.offsets.get(channel, 0.0)), float(current.offsets.get(channel, 0.0)))
+        add(channel, "fitting baseline", float(saved.baselines.get(channel, 0.0)),
+            float(current.baselines.get(channel, 0.0)))
+        add(channel, "fit model", saved.fit_models.get(channel) or saved.fit_model,
+            current.fit_models.get(channel) or current.fit_model)
+        add(channel, "baseline mode", saved.fit_baseline_modes.get(channel) or "fit_constant",
+            current.fit_baseline_modes.get(channel) or "fit_constant")
+        add(channel, "fitting regions", _describe_regions(saved.fit_regions.get(channel)),
+            _describe_regions(current.fit_regions.get(channel)))
+    return rows
+
+
+def changed_fit_channels(saved: ProcessingConfig, current: ProcessingConfig) -> set[str]:
+    """Channels whose fit inputs differ, i.e. the channels that must be fitted again."""
+    scope_keys = {"offset", "fitting baseline", "fit model", "baseline mode", "fitting regions"}
+    changed = {row["scope"] for row in compare_configs(saved, current)
+               if row["scope"] != "global" and row["parameter"] in scope_keys}
+    if (abs(saved.range_start_min - current.range_start_min) > RANGE_TOLERANCE_MIN
+            or abs(saved.range_end_min - current.range_end_min) > RANGE_TOLERANCE_MIN):
+        changed |= set(current.wavelengths)
+    return changed

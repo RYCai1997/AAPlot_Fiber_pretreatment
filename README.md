@@ -59,6 +59,57 @@ Whole-recording normalization and event analysis are then configured on the **Fu
 analysis** and **Event Analysis** tabs, and files are written from the **Export Results**
 tab.
 
+## Reusing a previous analysis
+
+When a recording folder already contains an exported analysis, the settings can be
+restored instead of typed in again, and only the parts that change are recomputed.
+
+**Detection.** After a folder is loaded, the recording folder and its immediate
+subfolders are searched for `parameters_and_marker_edits.json`. Every valid file is
+collected and the newest one is offered first. **Reuse Saved Analysis...** becomes
+available, and the status line names the folder and timestamp that were found. Files
+without a `processing` block are ignored.
+
+**Comparison.** The dialog lists one row per difference between the saved configuration and
+the current settings, with the saved value next to the current one. Rows whose scope is a
+wavelength are the ones that decide a refit. The summary above the table names the channels
+that still have a usable saved fit and the channels that would be fitted again. The data
+range is compared numerically, so the sampled end of a recording (`9.99944 min`) is not
+reported as different from `10 min`.
+
+**Initialise.** **Initialise From Saved** writes the saved values into the interface:
+
+| Restored | Notes |
+| --- | --- |
+| Data range, offsets, fitting baselines | Per visible wavelength |
+| Fitting regions, fit model, baseline mode | Marked `(restored)` in each channel's status |
+| Analysis and reference wavelength, combination, reference weight | Combination and weight are applied immediately |
+| Smoothing | Enabled only when the saved analysis used it |
+| dF/F0/Z-score baseline interval | Set to the saved interval in manual mode |
+| Markers | Original markers minus the deleted ones, plus the manual ones |
+| Output folder name | The folder that held the saved file |
+
+**Incremental recompute.** Each channel's fit is identified by a signature
+`(data version, channel, model, baseline mode, offset, baseline, fitting regions, data
+range)`. A saved fit whose signature matches is rebuilt from its stored parameters and put
+straight into the fit cache, so **Apply Correction** reuses it without fitting anything.
+Only channels whose signature changed are fitted again.
+
+| Change | Refit needed |
+| --- | --- |
+| Offset, fitting baseline, fit model, baseline mode, fitting regions, data range | That channel only (data range: every channel) |
+| Combination (`ratio` / `difference`), reference weight, analysis or reference wavelength | None |
+| Smoothing, output name, markers, dF/F0 baseline interval | None |
+
+The status line reports the split, for example `Reused the saved fit for 410; refitted
+470.` Each channel's parameters in `parameters_and_marker_edits.json` record
+`fit_reused_from_cache`, so a re-export documents which fits were reused.
+
+A channel falls back to a fresh fit when its saved model differs from the model now
+selected, when the saved parameters are missing, or when the saved fitted curve does not
+match the current data range. Those channels appear in the "refit needed" list before the
+initialisation is applied.
+
 ## Correction and fitting
 
 ### Bleaching correction
@@ -323,6 +374,12 @@ Original input files are read-only and are never modified.
   removed, the analysis level and dF/F0 scaling are unchanged, and the reference-noise and
   zero-crossing failure modes of the ratio are avoided. A blank weight uses the matched
   scale, which reproduces the ratio to first order.
+- Added **Reuse Saved Analysis**. An exported `parameters_and_marker_edits.json` under the
+  recording folder is detected on load, compared parameter by parameter with the current
+  settings, and can be restored with one button. Saved fitted curves are rebuilt from their
+  parameters and seeded into the fit cache, so applying the restored configuration refits
+  only the channels whose fit inputs changed; changing the channel combination, the
+  reference weight or the smoothing refits nothing.
 
 ## Author and development
 
