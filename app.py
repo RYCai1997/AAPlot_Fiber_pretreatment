@@ -326,8 +326,15 @@ class FitWindow:
                     f"A2={parameters['amplitude_2']:.6g}, tau2={parameters['tau_2_s']:.6g}s")
         elif model == "single_exponential":
             text = f"A={parameters['amplitude']:.6g}, tau={parameters['tau_s']:.6g}s"
+        elif model == "penalized":
+            text = (f"beta={parameters.get('beta', float('nan')):.4g}, "
+                    f"lambda={parameters.get('lambda', float('nan')):.4g}, "
+                    f"iterations={int(parameters.get('iterations', 0))}\n"
+                    f"fit points={int(parameters.get('fit_points', 0)):,}"
+                    f"{' (downsampled)' if parameters.get('downsampled') else ''}, "
+                    f"knots={len(parameters.get('curve_knots_t') or [])}")
         else:
-            text = f"slope={parameters['slope_per_s']:.6g}/s"
+            text = f"slope={parameters.get('slope_per_s', float('nan')):.6g}/s"
         if "fitted_constant" in parameters:
             text += f"\nC(fitted)={parameters['fitted_constant']:.6g}"
         elif "fixed_baseline" in parameters:
@@ -353,14 +360,23 @@ class FitWindow:
         self.start_async_fit(mask, self.show_preview_result)
 
     def show_preview_result(self, fitted: Any, parameters: dict[str, Any]) -> None:
-        warning_text = ("\nWarnings: " + "; ".join(parameters["fit_warnings"])) if parameters["fit_warnings"] else ""
+        warnings = parameters.get("fit_warnings") or []
+        warning_text = ("\nWarnings: " + "; ".join(warnings)) if warnings else ""
+        samples = (parameters.get("final_refinement_samples")
+                   or parameters.get("fit_points")
+                   or parameters.get("score_samples")
+                   or 0)
+        rmse = parameters.get("rmse_selected", float("nan"))
+        bic = parameters.get("bic_selected", float("nan"))
+        nfev = parameters.get("optimizer_nfev", 0)
+        optimality = parameters.get("optimizer_optimality", float("nan"))
         self.readout.set(
             f"Model: {self.selected_model} | baseline: {self.selected_baseline_mode}\n"
-            f"Selected samples used in final refinement: {parameters['final_refinement_samples']:,}\n"
-            f"RMSE: {parameters['rmse_selected']:.6g} | BIC: {parameters['bic_selected']:.3f}\n"
+            f"Selected samples used in final refinement: {int(samples):,}\n"
+            f"RMSE: {rmse:.6g} | BIC: {bic:.3f}\n"
             f"{self.parameter_text(parameters)}\n"
-            f"Converged: {'Yes' if parameters['optimizer_success'] else 'No'} | "
-            f"nfev={parameters['optimizer_nfev']} | optimality={parameters['optimizer_optimality']:.3g}"
+            f"Converged: {'Yes' if parameters.get('optimizer_success', True) else 'No'} | "
+            f"nfev={nfev} | optimality={optimality:.3g}"
             f"{warning_text}"
         )
         self.draw(fitted)
@@ -2113,7 +2129,10 @@ class PretreatmentApp:
         self.fit_baseline_modes[channel] = baseline_mode
         self.fit_betas[channel] = beta
         self.fit_lambdas[channel] = lam
-        self.vars[f"fit{channel}_status"].set(f"{len(regions)} region(s) | {model} | {baseline_mode}")
+        summary = f"{len(regions)} region(s) | {model} | {baseline_mode}"
+        if model == "penalized" and beta is not None and lam is not None:
+            summary += f" | beta={float(beta):g}, lambda={float(lam):g}"
+        self.vars[f"fit{channel}_status"].set(summary)
         self.vars["status"].set(f"{channel} fitting regions and model saved.")
 
     def apply_processing(self) -> None:

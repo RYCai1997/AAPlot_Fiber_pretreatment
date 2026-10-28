@@ -71,6 +71,10 @@ PLS_DEFAULT_LAMBDA = 10.0
 PLS_MAX_LAMBDA = 10.0
 PLS_MAX_POINTS = 1200
 PLS_KNOT_COUNT = 200
+# The reweighting can oscillate for a few rounds before it settles, so the cap is
+# generous and the tolerance is stated relative to the span of the log signal.
+PLS_MAX_ITERATIONS = 100
+PLS_TOLERANCE = 1e-5
 
 # Per-start and final budgets of the historical implementation, kept identical
 # so that a converged solution does not change (only the screening stage is new).
@@ -294,22 +298,31 @@ def fit_bleaching(
         parameter_count = 2
         bic = score_n * np.log(rss / score_n) + parameter_count * np.log(score_n)
         aic = score_n * np.log(rss / score_n) + 2 * parameter_count
+        pls_warnings: list[str] = []
+        if not parameters.get("converged", True):
+            pls_warnings.append(
+                f"The PLS reweighting reached the {PLS_MAX_ITERATIONS}-iteration limit; "
+                "the baseline may still be settling"
+            )
         parameters.update({
             "baseline_mode": baseline_mode,
             "fit_samples": int(valid.sum()),
+            "final_refinement_samples": int(parameters.get("fit_points", valid.sum())),
             "score_samples": int(score_n),
             "cost": float(np.sqrt(rss / score_n)),
             "rss_selected": rss,
             "rmse_selected": float(np.sqrt(rss / score_n)),
             "bic_selected": float(bic),
             "aicc_selected": float(aic),
-            "optimizer_success": True,
-            "optimizer_status": 0,
-            "optimizer_message": "iteratively reweighted penalised least squares",
+            "optimizer_success": bool(parameters.get("converged", True)),
+            "optimizer_status": 0 if parameters.get("converged", True) else 1,
+            "optimizer_message": ("iteratively reweighted penalised least squares"
+                                  if parameters.get("converged", True)
+                                  else "stopped at the iteration limit"),
             "optimizer_nfev": int(parameters.get("iterations", 0)),
             "optimizer_optimality": 0.0,
             "optimizer_active_mask": [0, 0],
-            "fit_warnings": [],
+            "fit_warnings": pls_warnings,
         })
         return fitted, parameters
 
@@ -1137,14 +1150,16 @@ def fit_penalized_baseline(
     fitted_log = solve(weights)
     span = max(float(np.ptp(logged)), 1e-9)
     iterations = 0
-    for iterations in range(1, 41):
+    converged = False
+    for iterations in range(1, PLS_MAX_ITERATIONS + 1):
         residual = logged - fitted_log
         weights = np.maximum(np.exp(-beta * np.maximum(residual, 0.0) / sigma), 1e-8)
         updated = solve(weights)
-        if float(np.max(np.abs(updated - fitted_log))) < 1e-7 * span:
-            fitted_log = updated
-            break
+        step = float(np.max(np.abs(updated - fitted_log)))
         fitted_log = updated
+        if step < PLS_TOLERANCE * span:
+            converged = True
+            break
 
     fitted_grid = np.exp(fitted_log)
     fitted = np.interp(x, grid_x, fitted_grid)
@@ -1156,6 +1171,8 @@ def fit_penalized_baseline(
         "lambda_scaled": float(lam_scaled),
         "noise_sigma_log": sigma,
         "iterations": int(iterations),
+        "converged": bool(converged),
+        "tolerance": float(PLS_TOLERANCE),
         "fit_points": int(n),
         "downsampled": bool(n < x.size),
         "curve_knots_t": [float(value) for value in grid_x[knot_index]],

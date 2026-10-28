@@ -310,6 +310,10 @@ How it works:
 2. A Whittaker smoother (second-difference penalty) is fitted with **iteratively
    reweighted least squares**: every round down-weights the samples that sit above the
    current fit, so upward transients drop out of the baseline while the decay is followed.
+   The reweighting can oscillate for a few rounds before it settles, so it runs until the
+   largest change falls below `1e-5` of the log span, with a cap of 100 iterations; if the
+   cap is reached the fit is marked as not converged and a warning is recorded instead of
+   claiming success.
 3. The result is interpolated back onto the full time axis and used exactly like the other
    models: `corrected = (raw − offset) × F(t₀) / F(t)`.
 
@@ -332,6 +336,9 @@ Notes:
   steep initial decay starts to look like an upward signal and the first minute is dragged
   below the data. That is why the caps exist. With the defaults the baseline stays within
   about 0.15 % of a known decay while a 3 s transient leaks only 4 % into the fit.
+- The fitting window preview reports `beta`, `lambda`, the iteration count, the number of
+  fit points (and whether they were down-sampled) and how many knots were stored, next to
+  the usual RMSE, BIC and convergence line.
 - `penalized` is not part of the automatic BIC model comparison, because it is not a
   parametric model and its effective degrees of freedom are not a single number. Select it
   explicitly in the fitting window.
@@ -542,6 +549,15 @@ Original input files are read-only and are never modified.
 - The **Estimate** exclusion window is now set by its own two fields under the weight,
   defaulting to 5 s before and 60 s after each marker, instead of borrowing the Event
   Analysis window. Retuning the event window no longer moves the weight.
+- Fixed a crash when previewing the PLS fit: the preview asked for its own parameter list
+  (regions used, slope) that a penalized fit does not have, and the readout then raised
+  `KeyError: 'final_refinement_samples'`. The preview now falls back through the keys the
+  model actually provides, prints the PLS settings, and the fit always reports how many
+  samples took part in the final refinement.
+- The PLS reweighting now states its convergence honestly: tolerance `1e-5` of the log span
+  with a cap of 100 iterations, `optimizer_success` set from the actual outcome, and a
+  warning when the cap is hit. Previously it stopped at 40 rounds and still reported
+  "Converged: Yes".
 - Added a **PLS fit** (`penalized`) bleaching model: decimated log-space Whittaker
   smoothing with iteratively reweighted least squares, so rising signals are excluded from
   the baseline. `beta` (1-8, default 8) and `lambda` (0.01-10, default 10) are set per
