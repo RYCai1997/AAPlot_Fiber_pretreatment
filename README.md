@@ -211,20 +211,67 @@ Then decide whether the reference over- or under-reacts:
 | Artifacts still show up with the **same sign** as the analysis channel | Reference under-reacts | Raise `w` |
 | Artifacts are gone and event amplitudes are unchanged | Current `w` is right | Keep it |
 
-**Estimate** fits the weight from the recording itself. It regresses the analysis channel's
-relative deviation on the reference channel's relative deviation with a soft-L1 loss,
-excluding every marker window (`event_pre_seconds` + `event_post_seconds` around each
-marker), and returns the value in the count scale used by the field. It needs an applied
-correction, and it reports how many samples were used next to the matched scale for
-comparison. With no markers, the whole trace is used and the status line warns that
-expected transients may bias the weight low.
+**Estimate** fits the weight from the recording itself. It needs an applied correction,
+because it works on the corrected traces and on the two channels' `correction_scale`
+values. Clicking it runs the following steps.
 
-Verify the result by checking three things: the artifact stretch flattens, the event
-amplitude is unchanged from the matched-scale run, and the weight stays positive. A weight
-far below the matched scale means the reference reacts strongly to whatever the artifact
-is; a weight above it means the reference is attenuated relative to the analysis channel.
+**1. Build the fitting sample.** Start from every sample where both corrected traces are
+finite, then remove each marker window: from `marker − event_pre_seconds` to
+`marker + event_post_seconds`. Artifacts stay in the sample; expected transients do not. The
+status line reports how many samples survive. With no markers the whole trace is used and
+the status line warns that expected transients may bias the weight low; if fewer than
+20 samples remain, nothing is estimated and an error is shown.
 
-The same computation is available from a script:
+**2. Convert both channels to relative deviations**, so a bright and a dim channel become
+comparable and the DC levels drop out:
+
+```
+a(t) = C_analysis(t) / F_analysis(t0) - 1
+b(t) = C_reference(t) / F_reference(t0) - 1
+```
+
+`F(t0)` is the per-channel `correction_scale`, the level the corrected trace is anchored on.
+
+**3. Fit one slope through the origin** with a soft-L1 loss:
+
+```
+minimise  sum( rho( k*b(t) - a(t) ) ),   rho = soft_l1,  f_scale = median(|a - median(a)|)
+```
+
+The slope starts from the closed-form least-squares value `sum(a*b) / sum(b*b)`. There is no
+intercept because both deviations are already referenced to their own level; a soft-L1 loss
+rather than a squared loss so a few remaining deflections — an unmarked transient, a
+movement spike — cannot drag the slope. `f_scale` is the median absolute deviation of `a`,
+so the loss scales with the noise of the analysis channel.
+
+**4. Convert the slope to the count scale of the field.**
+
+```
+w = k * F_analysis(t0) / F_reference(t0) = k * matched scale
+```
+
+The conversion is necessary because the fit and the field live in different spaces: the fit
+returns a slope between *relative* deviations, while the analysis trace subtracts *counts*.
+
+```
+analysis(t) = C_analysis(t) - w * (C_reference(t) - F_reference(t0))
+dF/F0(t) ~= a(t) - (w / matched) * b(t)
+```
+
+The residual artifact vanishes exactly when `w / matched = k`, which is the conversion
+above. Validation example: `matched = 1.524`, fitted `k = 0.333`, reported `w = 0.508`; with
+`w = 1.524` the artifact produced a 2.74 % deflection in dF/F0, with `w = 0.508` it was
+0.28 %, and the event amplitude moved only from 8.84 % to 8.74 %.
+
+**5. Report and verify.** The field is filled and the combination is recomputed
+immediately. The status line prints the sample count, the number of marker windows and the
+matched scale for comparison. Then check three things: the artifact stretch flattens, the
+event amplitude matches the matched-scale run (if it drops, the reference is carrying real
+signal and `w` is eating biology), and `w` stays positive. A weight far below the matched
+scale means the reference reacts strongly to whatever the artifact is; a weight above it
+means the reference is attenuated relative to the analysis channel.
+
+The same computation is available from a script and returns the same count-scale value:
 
 ```python
 from processing import estimate_reference_weight
@@ -232,7 +279,7 @@ from processing import estimate_reference_weight
 w = estimate_reference_weight(corrected_470, corrected_410, mask, level_470, level_410)
 ```
 
-`mask` selects the samples to use and both levels are the per-channel `correction_scale`
+`mask` selects the samples to fit on and both levels are the per-channel `correction_scale`
 values.
 
 ### Fitting
@@ -417,7 +464,9 @@ Original input files are read-only and are never modified.
   smoothing refits nothing.
 - The **Reference Weight** field now has an **Estimate** button. It fits the weight on all
   samples outside the marker windows, converts the result to the count scale of the field,
-  and reports the matched scale beside it for comparison. In a synthetic recording whose
+  and reports the matched scale beside it for comparison. The algorithm, its unit
+  conversion and the acceptance checks are written out in
+  **Choosing the reference weight**. In a synthetic recording whose
   reference reacted 2.5x more strongly than its level implied, the estimate landed within
   2 % of the grid-search optimum and cut the artifact deflection from 2.76 % to 0.29 %
   while leaving the event amplitude unchanged.
