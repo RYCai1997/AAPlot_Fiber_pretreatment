@@ -671,6 +671,11 @@ class PretreatmentApp:
                       wraplength=180).grid(row=2, column=1, sticky="w")
             self.wavelength_frames[wavelength] = frame
             frame.grid_remove()
+        row = self.section(data_tab, row, "Correction")
+        ttk.Label(data_tab, text="Corrected = (raw − offset) × fitted(t0) / fitted(t)\n"
+                                 "The bleaching factor is normalised to 1 at the start, so the trace keeps "
+                                 "the fluorescence scale of (raw − offset).",
+                  wraplength=350, justify="left").grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 6)); row += 1
         row = self.section(data_tab, row, "Analysis Trace")
         ttk.Label(data_tab, text="Analysis Wavelength").grid(row=row, column=0, sticky="w")
         self.analysis_wavelength_box = ttk.Combobox(
@@ -1382,7 +1387,12 @@ class PretreatmentApp:
             return
         combined = corrected_primary / corrected_reference
         combined_label = f"Corrected {primary} / {reference} ratio"
-        analysis_reference = self.number(f"baseline{primary}") / self.number(f"baseline{reference}")
+        parameters = (self.details or {}).get("fit_parameters", {})
+        if {primary, reference} <= set(parameters):
+            analysis_reference = (parameters[primary]["correction_scale"]
+                                  / parameters[reference]["correction_scale"])
+        else:
+            analysis_reference = self.number(f"baseline{primary}") / self.number(f"baseline{reference}")
 
         self.processed["combined_signal"] = combined
         self.processed["analysis_trace"] = combined

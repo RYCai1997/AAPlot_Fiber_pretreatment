@@ -521,11 +521,34 @@ def process_data(
                     cache.clear()
                 cache[cache_key] = (np.array(fitted, float, copy=True), copy.deepcopy(parameters))
         parameters["fit_regions"] = [list(region) for region in regions]
-        if np.any(np.isfinite(fitted) & np.isclose(fitted, 0)):
+        constant = parameters.get("fitted_constant")
+        if constant is None:
+            constant = parameters.get("fixed_baseline", 0.0)
+        constant = float(constant)
+        parameters["correction_constant"] = constant
+        # Correction divides by the bleaching factor normalized to 1 at t0, so the
+        # corrected trace keeps the fluorescence scale of (raw - offset) and the
+        # transient is not attenuated by the residual bleaching.
+        scale = float(fitted[0])
+        if not np.isfinite(scale) or np.isclose(scale, 0):
             raise ValueError(
-                f"The fitted {wavelength} curve contains zero. Adjust its baseline, offset, or fitting regions."
+                f"The fitted {wavelength} curve is zero at the start of the trace; "
+                "the correction cannot be calculated."
             )
-        channel_corrected = adjusted / fitted * baseline
+        if np.any(np.isfinite(fitted) & (np.abs(fitted) < 1e-3 * abs(scale))):
+            raise ValueError(
+                f"The fitted {wavelength} curve approaches zero. Adjust its offset or fitting regions."
+            )
+        channel_corrected = adjusted * (scale / fitted)
+        parameters["correction_scale"] = scale
+        if baseline_mode == "fixed" and float(baseline) != 0.0:
+            tail = adjusted[np.isfinite(adjusted)][-max(20, int(0.05 * np.isfinite(adjusted).sum())):]
+            plateau = float(np.median(tail)) if tail.size else float("nan")
+            if np.isfinite(plateau) and plateau != 0.0 and not 0.95 <= float(baseline) / plateau <= 1.05:
+                parameters.setdefault("fit_warnings", []).append(
+                    f"The fixed baseline {float(baseline):.6g} is not the plateau of the data "
+                    f"({plateau:.6g}); the fixed mode pins the fitted curve to the baseline"
+                )
         output_columns[f"raw_{wavelength}"] = raw
         output_columns[f"offset_adjusted_{wavelength}"] = adjusted
         output_columns[f"fit_{wavelength}"] = fitted
@@ -546,11 +569,12 @@ def process_data(
             )
         combined = corrected[primary] / corrected[reference]
         combined_label = f"Corrected {primary} / {reference} ratio"
-        analysis_reference = config.baselines[primary] / config.baselines[reference]
+        analysis_reference = (fit_parameters[primary]["correction_scale"]
+                              / fit_parameters[reference]["correction_scale"])
         analysis_trace = combined.copy()
     else:
         analysis_trace = corrected[primary].copy()
-        analysis_reference = config.baselines[primary]
+        analysis_reference = fit_parameters[primary]["correction_scale"]
 
     smooth_points = max(1, int(round(config.smooth_seconds * sample_rate)))
     combined_smoothed = (pd.Series(combined).rolling(smooth_points, center=True, min_periods=1).mean().to_numpy()
@@ -582,7 +606,7 @@ def process_data(
         "source_channel": source,
         "definitions": {
             "baseline": "user value is either a fixed model constant or the initial estimate for a fitted constant, as recorded per channel",
-            "corrected_channel": "(raw - offset) / independently fitted bleaching * user baseline",
+            "corrected_channel": "(raw - offset) x (fitted at t0 / fitted); the bleaching factor is normalised to 1 at t0",
             "fit_regions": "only samples inside the user-selected intervals are used for parameter estimation",
         },
     }

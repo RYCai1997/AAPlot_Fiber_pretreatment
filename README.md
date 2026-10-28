@@ -61,15 +61,65 @@ tab.
 
 ## Correction and fitting
 
-- Each wavelength is fitted independently; one wavelength is never used as the regression
-  basis for another.
-- Corrected channel: `(raw - offset) / independently fitted bleaching × user baseline`.
+### Bleaching correction
+
+Every wavelength is fitted and corrected independently; one wavelength is never used as
+the regression basis for another.
+
+```
+corrected(t) = (raw(t) − offset) × F(t₀) / F(t)
+```
+
+- `raw(t)` is the recorded fluorescence of that wavelength.
+- `offset` is the instrument reading with no sample attached — fluorescence that carries
+  no biological information. It is subtracted **before** the fit, so it can never be
+  re-absorbed by the fitted constant.
+- `F(t)` is the independently fitted bleaching curve, evaluated over the whole trace.
+- `F(t₀)` normalises the bleaching factor to 1 at the start of the trace, so the corrected
+  trace keeps the fluorescence scale of `raw − offset`.
+
+Properties of this form:
+
+| Question | Behaviour |
+| --- | --- |
+| Where does the corrected trace sit? | On the `raw − offset` level at t₀, i.e. the un-bleached fluorescence |
+| Is the bleaching removed? | Yes — divided out at every sample, so the transient itself is un-bleached, not merely shifted |
+| Does the offset matter? | Yes — it sets F0. Skipping it inflates F0 and scales every dF/F0 by `F_true / (F_true + residual offset)` |
+| Does the transient amplitude depend on when it occurred? | No — the same relative response at 1 min and at 10 min |
+| Does the user baseline set the output scale? | No — it only seeds the free constant (`fit_constant`) or pins it (`fixed`) |
+
+The previous version multiplied by a user-entered baseline instead of `F(t₀)`:
+
+```
+corrected(t) = (raw(t) − offset) / F(t) × baseline        # retired
+```
+
+That form had two defects. First, the corrected level was pinned to whatever number the
+user typed, so a baseline larger than the actual data made the corrected trace read higher
+than the raw trace, and dF/F0 silently inherited that scale. Second, because the constant
+term was fitted to `raw − offset`, it absorbed the offset exactly, so the offset never
+reached F0 and a missing offset showed up only as a compressed dF/F0 — invisible in the
+plot. The current form removes both problems.
+
+Use the plotted **Fit** curve together with the reported `correction_constant` and
+`correction_scale` in `parameters_and_marker_edits.json` to verify what was subtracted and
+where the trace was anchored.
+
+### Fitting
+
 - The fitting window supports linear, single-exponential, and double-exponential models
   and one or more regions that can be dragged or resized; use **Add Region** and
   **Delete Selected Region** to edit the set. **Preview Fit** draws the candidate curve
   and reports its parameters, RMSE, and BIC; **Use These Regions** confirms the fit for
   that wavelength.
-- The baseline initializes the freely fitted constant (`fit_constant`).
+- Only samples inside the selected regions enter parameter estimation, refinement, or
+  scoring, but the fitted curve is evaluated over the whole trace. Regions that skip the
+  initial decay therefore extrapolate and distort the early corrected values.
+- The baseline initializes the freely fitted constant (`fit_constant`) and is used as the
+  fixed constant in `fixed` mode. In `fixed` mode a baseline that disagrees with the
+  plateau of the data is reported in `fit_warnings`.
+- The fitted curve must stay positive and away from zero; a correction that would divide
+  by a near-zero value is rejected instead of producing spikes.
 - Fitting runs in the background: a progress bar and a **Cancel Fit** button appear below
   the plot while it works. Results whose data or settings changed in the meantime are
   discarded instead of applied.
@@ -204,6 +254,24 @@ Original input files are read-only and are never modified.
   creates or reuses the `aaplot` conda environment, validates `requirements.txt` with the new
   `env_check.py`, installs missing packages with `pip`, and starts `app.py` with that
   environment's interpreter; `--no-install` only checks and `--recreate` rebuilds the env.
+
+### 2026-10-28
+
+- Optimised the bleaching correction algorithm. The corrected trace is now
+  `(raw − offset) × F(t₀) / F(t)` instead of `(raw − offset) / F(t) × baseline`, where
+  `F(t)` is the independently fitted bleaching curve. Dividing by the bleaching factor
+  normalised at t₀ un-bleaches the transient itself and keeps the fluorescence scale of
+  `raw − offset`, while the user baseline no longer controls the output level.
+- The offset is subtracted before the fit and therefore reaches F0 directly. Omitting it
+  no longer hides inside the fitted constant: it inflates F0 and compresses every dF/F0 by
+  `F_true / (F_true + residual offset)`.
+- The correction previously pinned the corrected level to the user baseline, which made a
+  large baseline push the corrected trace above the raw data. That dependency is gone.
+- Division by a near-zero fitted value is now rejected with an explicit message instead of
+  producing spikes, and `fixed`-mode baselines that disagree with the plateau of the data
+  are reported in `fit_warnings`.
+- Corrected traces and the ratio are anchored on `F(t₀)` per channel, so the expected ratio
+  level equals `F(t₀)_analysis / F(t₀)_reference` and is written to the output details.
 
 ## Author and development
 
