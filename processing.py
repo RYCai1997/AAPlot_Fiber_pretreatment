@@ -510,12 +510,16 @@ def estimate_reference_weight(
     primary_level: float,
     reference_level: float,
 ) -> float:
-    """Robust weight for difference mode, fitted on samples without expected events.
+    """Weight for difference mode, fitted on samples without expected events.
 
-    Both traces are expressed as relative deviations from their own level, then a
-    single slope through the origin is fitted with a soft-L1 loss. Select ``mask``
-    over a stretch that contains artifacts but no expected transients; otherwise
-    the real signal is mistaken for an artifact and the weight is biased.
+    Both traces are expressed as relative deviations from their own level and a
+    single slope through the origin is fitted with a soft-L1 loss. That slope is
+    then converted to the count scale used by ``reference_weight``, so the result
+    can be entered in the Reference Weight field unchanged.
+
+    Select ``mask`` over a stretch that contains artifacts but no expected
+    transients; otherwise the real signal is mistaken for an artifact and the
+    weight is biased low.
     """
     a = np.asarray(primary, float) / float(primary_level) - 1.0
     b = np.asarray(reference, float) / float(reference_level) - 1.0
@@ -527,7 +531,9 @@ def estimate_reference_weight(
         raise ValueError("The reference channel does not vary; the weight cannot be estimated.")
     result = least_squares(lambda p: p[0] * b - a, [float(np.dot(a, b) / np.dot(b, b))],
                            loss="soft_l1", f_scale=float(np.median(np.abs(a - np.median(a))) or 1.0))
-    return float(result.x[0])
+    relative_weight = float(result.x[0])
+    matched = float(primary_level) / float(reference_level)
+    return relative_weight * matched
 
 
 def select_effective_data(data: pd.DataFrame, config: ProcessingConfig) -> pd.DataFrame:

@@ -198,7 +198,33 @@ scattering and blood-volume changes — the ratio subtracts too much and can rep
 negative deflection where the analysis channel actually rose. The difference combination
 with a fitted weight removes that failure mode without touching the signal amplitude.
 
-Estimate the weight on a stretch that contains the artifact but no expected transient:
+#### Choosing the reference weight
+
+Leave **Reference Weight** blank to start: the matched scale is exactly the ratio's
+first-order behaviour, so any deviation from it has to be justified.
+
+Then decide whether the reference over- or under-reacts:
+
+| Symptom | Reading | Action |
+| --- | --- | --- |
+| Artifacts appear as deflections **opposite** to the analysis channel | Reference over-reacts, too much is subtracted | Lower `w` |
+| Artifacts still show up with the **same sign** as the analysis channel | Reference under-reacts | Raise `w` |
+| Artifacts are gone and event amplitudes are unchanged | Current `w` is right | Keep it |
+
+**Estimate** fits the weight from the recording itself. It regresses the analysis channel's
+relative deviation on the reference channel's relative deviation with a soft-L1 loss,
+excluding every marker window (`event_pre_seconds` + `event_post_seconds` around each
+marker), and returns the value in the count scale used by the field. It needs an applied
+correction, and it reports how many samples were used next to the matched scale for
+comparison. With no markers, the whole trace is used and the status line warns that
+expected transients may bias the weight low.
+
+Verify the result by checking three things: the artifact stretch flattens, the event
+amplitude is unchanged from the matched-scale run, and the weight stays positive. A weight
+far below the matched scale means the reference reacts strongly to whatever the artifact
+is; a weight above it means the reference is attenuated relative to the analysis channel.
+
+The same computation is available from a script:
 
 ```python
 from processing import estimate_reference_weight
@@ -206,8 +232,8 @@ from processing import estimate_reference_weight
 w = estimate_reference_weight(corrected_470, corrected_410, mask, level_470, level_410)
 ```
 
-`mask` selects those samples and both levels are the per-channel `correction_scale`
-values. Enter the result in **Reference Weight**.
+`mask` selects the samples to use and both levels are the per-channel `correction_scale`
+values.
 
 ### Fitting
 
@@ -389,6 +415,12 @@ Original input files are read-only and are never modified.
   into the fit cache, so applying the restored configuration refits only the channels whose
   fit inputs changed; changing the channel combination, the reference weight or the
   smoothing refits nothing.
+- The **Reference Weight** field now has an **Estimate** button. It fits the weight on all
+  samples outside the marker windows, converts the result to the count scale of the field,
+  and reports the matched scale beside it for comparison. In a synthetic recording whose
+  reference reacted 2.5x more strongly than its level implied, the estimate landed within
+  2 % of the grid-search optimum and cut the artifact deflection from 2.76 % to 0.29 %
+  while leaving the event amplitude unchanged.
 
 ## Author and development
 

@@ -715,11 +715,19 @@ class PretreatmentApp:
         self.combine_box.grid(row=row, column=1, sticky="ew"); row += 1
         self.combine_box.bind("<<ComboboxSelected>>", lambda _event: self.combine_changed())
         ttk.Label(data_tab, text="Reference Weight").grid(row=row, column=0, sticky="w")
-        self.reference_weight_entry = ttk.Entry(data_tab, textvariable=self.vars["reference_weight"],
-                                                width=12, state="disabled")
-        self.reference_weight_entry.grid(row=row, column=1, sticky="ew"); row += 1
+        weight_row = ttk.Frame(data_tab)
+        weight_row.grid(row=row, column=1, sticky="ew"); row += 1
+        weight_row.columnconfigure(0, weight=1)
+        self.reference_weight_entry = ttk.Entry(weight_row, textvariable=self.vars["reference_weight"],
+                                                width=10, state="disabled")
+        self.reference_weight_entry.grid(row=0, column=0, sticky="ew")
+        self.estimate_weight_button = ttk.Button(weight_row, text="Estimate", width=9,
+                                                 command=self.estimate_reference_weight_clicked,
+                                                 state="disabled")
+        self.estimate_weight_button.grid(row=0, column=1, sticky="e", padx=(4, 0))
         ttk.Label(data_tab, text="Blank = matched scale (analysis level / reference level). "
-                                 "Used by the difference combination only.",
+                                 "Estimate fits the weight on all samples outside the marker "
+                                 "windows and needs an applied correction.",
                   wraplength=350, justify="left").grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 6)); row += 1
         ttk.Button(data_tab, text="Apply Correction", command=self.apply_processing, style="Accent.TButton").grid(row=row, column=0, columnspan=2, sticky="ew", pady=(8, 3)); row += 1
         row = self.section(data_tab, row, "Markers (Working Copy)")
@@ -1043,8 +1051,7 @@ class PretreatmentApp:
         self.line_width_selector_var.set(LINE_WIDTH_LABELS["raw470"])
         self.line_width_scale.configure(variable=self.line_width_vars["raw470"])
         self.line_width_text.set("1.0")
-        if hasattr(self, "reference_weight_entry"):
-            self.reference_weight_entry.configure(state="disabled")
+        self.sync_reference_weight_state()
         self.axis_scale_vars.clear()
         self.axis_lower_vars.clear()
         self.axis_upper_vars.clear()
@@ -1359,6 +1366,74 @@ class PretreatmentApp:
             )
         except Exception as exc:
             messagebox.showerror("Load Failed", str(exc))
+
+    def sync_reference_weight_state(self) -> None:
+        """The weight is only meaningful for the difference combination."""
+        difference = self.vars["combine"].get() == "difference"
+        has_reference = self.reference_wavelength_var.get() not in {"", "None"}
+        if hasattr(self, "reference_weight_entry"):
+            self.reference_weight_entry.configure(
+                state="normal" if difference and has_reference else "disabled"
+            )
+        if hasattr(self, "estimate_weight_button"):
+            ready = (difference and has_reference and self.processed is not None
+                     and bool((self.details or {}).get("fit_parameters")))
+            self.estimate_weight_button.configure(state="normal" if ready else "disabled")
+
+    def estimate_reference_weight_clicked(self) -> None:
+        """Fit the reference weight on everything except the marker windows."""
+        from tkinter import messagebox
+        primary = self.analysis_wavelength_var.get()
+        reference = self.reference_wavelength_var.get()
+        parameters = (self.details or {}).get("fit_parameters") or {}
+        if self.processed is None or not {primary, reference} <= set(parameters):
+            messagebox.showinfo(
+                "Apply Correction First",
+                "The corrected traces are needed. Select the analysis and reference wavelength, "
+                "then click Apply Correction.",
+            )
+            return
+        time_min = self.processed["time_min"].to_numpy(float)
+        mask = np.isfinite(time_min) & np.isfinite(
+            self.processed[f"corrected_{primary}"].to_numpy(float)) & np.isfinite(
+            self.processed[f"corrected_{reference}"].to_numpy(float))
+        pre = max(0.0, self.parsed_number("event_pre_seconds", 5.0))
+        post = max(0.0, self.parsed_number("event_post_seconds", 30.0))
+        excluded = 0
+        for marker in self.markers:
+            window = ((time_min >= marker["time_min"] - pre / 60.0)
+                      & (time_min <= marker["time_min"] + post / 60.0))
+            excluded += int((mask & window).sum())
+            mask &= ~window
+        note = ""
+        if not self.markers:
+            note = " No markers are defined, so expected transients inside the trace may bias the estimate."
+        elif mask.sum() < 20:
+            messagebox.showerror(
+                "Not Enough Sample Left",
+                "The marker windows cover the recording. Remove some markers or shorten the event "
+                "window in Event Analysis, then try again.",
+            )
+            return
+        try:
+            weight = estimate_reference_weight(
+                self.processed[f"corrected_{primary}"].to_numpy(float),
+                self.processed[f"corrected_{reference}"].to_numpy(float),
+                mask,
+                float(parameters[primary]["correction_scale"]),
+                float(parameters[reference]["correction_scale"]),
+            )
+        except Exception as exc:  # noqa: BLE001 - reported to the user
+            messagebox.showerror("Cannot Estimate Weight", str(exc))
+            return
+        matched = (float(parameters[primary]["correction_scale"])
+                   / float(parameters[reference]["correction_scale"]))
+        self.vars["reference_weight"].set(f"{weight:.4g}")
+        self.combine_changed()
+        self.vars["status"].set(
+            f"Reference weight {weight:.4g} from {int(mask.sum()):,} samples outside "
+            f"{len(self.markers)} marker window(s); matched scale is {matched:.4g}.{note}"
+        )
 
     def parsed_number(self, key: str, default: Any = None) -> Any:
         text = self.vars[key].get().strip()
@@ -1688,10 +1763,7 @@ class PretreatmentApp:
             self.reference_wavelength_var.set("410" if "410" in references else "None")
         has_reference = self.reference_wavelength_var.get() != "None"
         self.combine_box.configure(state="readonly" if has_reference else "disabled")
-        if hasattr(self, "reference_weight_entry"):
-            self.reference_weight_entry.configure(
-                state="normal" if has_reference and self.vars["combine"].get() == "difference" else "disabled"
-            )
+        self.sync_reference_weight_state()
         self.refresh_event_signal_list(prefer_default=True)
         if self.event_trials is not None:
             self.clear_event_analysis("Analysis wavelength changed. Recalculate the event analysis.")
@@ -1709,8 +1781,7 @@ class PretreatmentApp:
         primary = self.analysis_wavelength_var.get()
         reference = self.reference_wavelength_var.get()
         mode = self.vars["combine"].get()
-        if hasattr(self, "reference_weight_entry"):
-            self.reference_weight_entry.configure(state="normal" if mode == "difference" else "disabled")
+        self.sync_reference_weight_state()
         if reference in {"", "None"}:
             return
         if self.processed is None:
@@ -1953,6 +2024,7 @@ class PretreatmentApp:
         self.last_applied_config = self.pending_config
         self.pending_config = None
         self.normalized = False
+        self.sync_reference_weight_state()
         self.clear_event_analysis("Correction updated. Select a marker name and calculate event analysis.")
         self.refresh_event_signal_list()
         self.display_cache.clear()
