@@ -313,8 +313,13 @@ values.
 - Fitting runs in the background: a progress bar and a **Cancel Fit** button appear below
   the plot while it works. Results whose data or settings changed in the meantime are
   discarded instead of applied.
-- Changing the valid data range, offset, baseline, or model invalidates that wavelength's
-  confirmed fit and requires confirmation again before **Apply Correction** succeeds.
+- Changing the **data range**, the **fit model** or the **baseline mode** invalidates that
+  wavelength's confirmed fit and requires confirming the regions again before **Apply
+  Correction** succeeds.
+- Changing the **offset** or the **fitting baseline** does not need a confirmation: they
+  change the fit input, not the regions or the model, so **Apply Correction** refits that
+  channel immediately. The corrected trace moves one-for-one with the offset, because the
+  correction is anchored on `raw − offset`.
 
 ## Display processing
 
@@ -485,6 +490,11 @@ Original input files are read-only and are never modified.
 - The **Estimate** exclusion window is now set by its own two fields under the weight,
   defaulting to 5 s before and 60 s after each marker, instead of borrowing the Event
   Analysis window. Retuning the event window no longer moves the weight.
+- Changing an **offset** or a **fitting baseline** no longer blocks **Apply Correction**
+  with "reconfirm this channel's fit". Those two fields are excluded from the confirmation
+  signature and the channel is refitted on apply, so an offset edit shows up in the trace in
+  one click. A data-range, model or baseline-mode change still requires confirming the
+  regions again.
 - `difference` is now the default channel combination; `ratio` remains selectable for
   comparisons with earlier analyses.
 - The window opens at a size derived from the screen (up to 1860x1180) with a smaller

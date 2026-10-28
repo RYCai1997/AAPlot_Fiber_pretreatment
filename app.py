@@ -196,8 +196,8 @@ class FitWindow:
         self.refresh_list(); self.draw()
 
     def signature(self) -> tuple[Any, ...]:
-        offset = self.config.offsets[self.channel]
-        return (self.config.range_start_min, self.config.range_end_min, offset, self.baseline,
+        """Fitting regions and model only; offset and baseline are refitted silently."""
+        return (self.config.range_start_min, self.config.range_end_min,
                 self.selected_model, self.selected_baseline_mode)
 
     def refresh_list(self) -> None:
@@ -1426,11 +1426,15 @@ class PretreatmentApp:
             messagebox.showerror("Invalid Display Processing Settings", str(exc))
 
     def expected_signature(self, channel: str, config: ProcessingConfig) -> tuple[Any, ...]:
-        offset = config.offsets[channel]
-        baseline = config.baselines[channel]
+        """What the user confirmed in the fitting window.
+
+        Offset and baseline are deliberately excluded: they change the fit input but
+        not the regions or the model, so a changed offset is refitted automatically
+        instead of blocking Apply until the window is reopened.
+        """
         model = self.fit_models[channel] or config.fit_model
         baseline_mode = self.fit_baseline_modes[channel] or "fit_constant"
-        return (config.range_start_min, config.range_end_min, offset, baseline, model, baseline_mode)
+        return (config.range_start_min, config.range_end_min, model, baseline_mode)
 
     def open_folder(self) -> None:
         from tkinter import filedialog, messagebox
@@ -2026,7 +2030,10 @@ class PretreatmentApp:
                 if not self.fit_regions[channel]:
                     raise ValueError(f"Select and confirm fitting regions in the {channel} fitting window first.")
                 if self.fit_signatures[channel] != self.expected_signature(channel, config):
-                    raise ValueError(f"The {channel} range, offset, baseline, or fitting model has changed. Reconfirm this channel's fit.")
+                    raise ValueError(
+                        f"The {channel} data range, fitting model or baseline mode has changed. "
+                        "Reopen its fitting window and confirm the regions again."
+                    )
         except Exception as exc:
             messagebox.showerror("Processing Failed", str(exc)); self.vars["status"].set(f"Processing failed: {exc}")
             return
