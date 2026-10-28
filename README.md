@@ -338,8 +338,11 @@ Every corrected wavelength is also normalized separately and retained as
 
 The **Event Analysis** tab operates on corrected data and has its own multi-select
 **Signals to Analyze** list. Every available corrected wavelength (410, 470, and/or 560)
-can be analyzed separately, together with the ratio defined by the current **Analysis
-Wavelength / Reference Wavelength** pair. Choose one or several signals, or use
+can be analyzed separately, together with the channel combination defined by the current
+**Analysis Wavelength / Reference Wavelength** pair — a ratio or a weighted difference,
+whichever **Combine Channels** selects, labelled with its weight. The combination is read
+from the processed trace, so changing the combination or the reference weight invalidates
+the event results and they have to be recalculated. Choose one or several signals, or use
 **Select All Signals** / **Clear Signals**. When several signals are selected, their trial
 traces and mean ± SEM curves are distinguished by signal in the same four-panel event
 figure.
@@ -357,7 +360,8 @@ Event CSV files are grouped by marker name: one file per analyzed marker, with t
 relative time axis in the first column, one `dF/F0_trialNN` column per trial, one empty
 separator column, then the matching `Z-score_trialNN` columns. When several signals are
 selected, column names carry the signal prefix (`410_dF/F0_trial01`,
-`ratio_470_410_dF/F0_trial01`) and columns are grouped signal by signal.
+`ratio_470_410_dF/F0_trial01` or `difference_470_410_dF/F0_trial01`) and columns are
+grouped signal by signal.
 
 ## Result output
 
@@ -462,6 +466,11 @@ Original input files are read-only and are never modified.
   into the fit cache, so applying the restored configuration refits only the channels whose
   fit inputs changed; changing the channel combination, the reference weight or the
   smoothing refits nothing.
+- Event analysis now uses the stored combination trace instead of recomputing a ratio of
+  its own, so switching between `ratio` and `difference` and changing the reference weight
+  flow through to the trial traces, the mean ± SEM curves and the exported columns. Those
+  results are cleared when the combination changes, because they were computed from the
+  previous trace.
 - The **Reference Weight** field now has an **Estimate** button. It fits the weight on all
   samples outside the marker windows, converts the result to the count scale of the field,
   and reports the matched scale beside it for comparison. The algorithm, its unit

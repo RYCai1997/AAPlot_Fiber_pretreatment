@@ -1820,12 +1820,15 @@ class PretreatmentApp:
         if self.details is not None:
             self.details["combined_label"] = combined_label
             self.details["combine"] = mode
+            self.details["reference_weight"] = (None if mode == "ratio" else _weight)
             self.details["analysis_reference_from_user_baselines"] = float(analysis_reference)
             self.details["normalization"] = None
+        self.refresh_event_signal_list()
         self.rebuild_axes()
         self.draw_processed()
         self.vars["status"].set(
-            f"Channel combination changed to {mode}. Recalculate dF/F0 and Z-score if needed."
+            f"Channel combination changed to {mode}. Recalculate dF/F0, Z-score and event "
+            "analysis if needed."
         )
 
     def channel_changed(self) -> None:
@@ -2715,10 +2718,20 @@ class PretreatmentApp:
         if (analysis in self.available_wavelengths
                 and reference in self.available_wavelengths
                 and analysis != reference):
+            mode = self.vars["combine"].get()
+            weight = (self.details or {}).get("reference_weight")
+            if mode == "difference":
+                label = f"Difference {analysis}/{reference}"
+                if weight is not None:
+                    label += f" (w={float(weight):.4g})"
+            else:
+                label = f"Ratio {analysis}/{reference}"
             choices.append({
                 "key": f"ratio:{analysis}/{reference}",
-                "label": f"Ratio {analysis}/{reference}",
-                "kind": "ratio",
+                "label": label,
+                "kind": "combined",
+                "column": "combined_signal",
+                "mode": mode,
                 "numerator": analysis,
                 "denominator": reference,
             })
@@ -2791,23 +2804,20 @@ class PretreatmentApp:
         self.event_signal_selection_changed()
 
     def event_signal_values(self, signal: dict[str, str]) -> np.ndarray:
+        """Values of one event signal, always taken from the current processed table.
+
+        The channel combination is read from the stored ``combined_signal`` column, so
+        the event analysis follows the configured combination and reference weight
+        instead of recomputing a ratio of its own.
+        """
         if self.processed is None:
             raise ValueError("Apply correction before calculating event analysis.")
-        if signal["kind"] == "wavelength":
+        if signal["kind"] in {"wavelength", "combined"}:
             column = signal["column"]
             if column not in self.processed:
                 raise ValueError(f"{signal['label']} is unavailable in the corrected data.")
             return self.display_values(column)
-        numerator_column = f"corrected_{signal['numerator']}"
-        denominator_column = f"corrected_{signal['denominator']}"
-        if numerator_column not in self.processed or denominator_column not in self.processed:
-            raise ValueError(f"{signal['label']} is unavailable in the corrected data.")
-        numerator = self.processed[numerator_column].to_numpy(float)
-        denominator = self.processed[denominator_column].to_numpy(float)
-        ratio = np.full(len(self.processed), np.nan, dtype=float)
-        valid = np.isfinite(numerator) & np.isfinite(denominator) & ~np.isclose(denominator, 0)
-        np.divide(numerator, denominator, out=ratio, where=valid)
-        return self.smooth_array(ratio)
+        raise ValueError(f"Unknown event signal: {signal.get('label', signal)}")
 
     def selected_event_markers(self) -> list[dict[str, Any]]:
         """Return only the event markers explicitly selected in the event-analysis list."""
@@ -3297,7 +3307,8 @@ class PretreatmentApp:
             return signal.get("key", "wavelength").split(":", 1)[-1]
         numerator = signal.get("numerator", "numerator")
         denominator = signal.get("denominator", "denominator")
-        return f"ratio_{numerator}_{denominator}"
+        mode = signal.get("mode") or "ratio"
+        return f"{mode}_{numerator}_{denominator}"
 
     def event_trials_for_export(self) -> pd.DataFrame:
         """Convert internal long-form trials to signal-grouped wide columns."""
