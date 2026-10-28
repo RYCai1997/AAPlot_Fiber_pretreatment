@@ -51,8 +51,8 @@ fit, correction, dF/F0, Z-score, plotting, and export support as 410 and 470.
 2. For every visible wavelength, enter its **Offset** and **Fitting Baseline**, then open
    **Configure <wavelength> Fit...** to select one or more fitting regions and the model.
 3. Choose the **Analysis Wavelength** and, optionally, a **Reference Wavelength**. With a
-   reference, the corrected channels are combined as `ratio`; with `None`, the
-   independently corrected analysis wavelength is used directly.
+   reference, pick **Combine Channels** = `ratio` or `difference` and apply; with `None`,
+   the independently corrected analysis wavelength is used directly.
 4. Click **Apply Correction**. Every available wavelength is corrected independently.
 
 Whole-recording normalization and event analysis are then configured on the **Full trace
@@ -91,6 +91,65 @@ Properties of this form:
 Use the plotted **Fit** curve together with the reported `correction_constant` and
 `correction_scale` in `parameters_and_marker_edits.json` to verify what was subtracted and
 where the trace was anchored.
+
+### Channel combination
+
+Two combinations are available; both produce the analysis trace that dF/F0 and Z-score are
+computed from.
+
+**Ratio** (`combine = ratio`)
+
+```
+analysis(t) = C_analysis(t) / C_reference(t)
+dF/F0(t)    = 100 · (analysis(t) − analysis₀) / analysis₀ ,   analysis₀ = F_analysis(t₀) / F_reference(t₀)
+```
+
+Equivalent to `100 · [(1+a)/(1+b) − 1]` with `a` and `b` the relative deviations of the two
+channels, so it removes a fluctuation that is proportional to each channel's own level.
+
+**Difference** (`combine = difference`)
+
+```
+analysis(t) = C_analysis(t) − w · (C_reference(t) − F_reference(t₀))
+dF/F0(t)    = 100 · (analysis(t) − analysis₀) / analysis₀ ,   analysis₀ = F_analysis(t₀)
+```
+
+Only the deviation of the reference is removed, so the trace keeps the level of the
+analysis channel and dF/F0 divides by `F_analysis(t₀)` as usual. `w` is the **Reference
+Weight** field:
+
+- blank → `w = F_analysis(t₀) / F_reference(t₀)`, the matched scale. To first order this
+  reproduces the ratio while never dividing by the reference.
+- a number → that weight. Use it when the reference reacts to artifacts more or less
+  strongly than its own level implies.
+- `w = 0` → the reference is ignored (equivalent to no reference).
+
+| | Ratio | Difference |
+| --- | --- | --- |
+| Removes multiplicative common mode (LED, coupling) | Yes | Yes, at matched scale |
+| Removes additive artifacts (motion) | Yes, at matched scale | Yes, tunable through `w` |
+| Behaviour when the reference dips | Can cross zero and raise an error | Always finite |
+| Reference noise injected into dF/F0 | Multiplicative, full weight | Additive, weight `w` |
+| Large-response behaviour | Non-linear and asymmetric | Linear |
+| Reference stronger than its level implies | Over-corrects, can turn a positive deflection negative | Fixed by lowering `w` |
+| Extra parameter | None | `w` |
+
+The ratio assumes the artifact on the reference scales with the reference level. When the
+reference is more sensitive than that — common for an isosbestic channel, which picks up
+scattering and blood-volume changes — the ratio subtracts too much and can report a
+negative deflection where the analysis channel actually rose. The difference combination
+with a fitted weight removes that failure mode without touching the signal amplitude.
+
+Estimate the weight on a stretch that contains the artifact but no expected transient:
+
+```python
+from processing import estimate_reference_weight
+
+w = estimate_reference_weight(corrected_470, corrected_410, mask, level_470, level_410)
+```
+
+`mask` selects those samples and both levels are the per-channel `correction_scale`
+values. Enter the result in **Reference Weight**.
 
 ### Fitting
 
@@ -259,6 +318,11 @@ Original input files are read-only and are never modified.
   are reported in `fit_warnings`.
 - Corrected traces and the ratio are anchored on `F(t₀)` per channel, so the expected ratio
   level equals `F(t₀)_analysis / F(t₀)_reference` and is written to the output details.
+- Added the `difference` channel combination next to `ratio`, so the reference can be
+  subtracted with an explicit weight instead of divided. Only the reference deviation is
+  removed, the analysis level and dF/F0 scaling are unchanged, and the reference-noise and
+  zero-crossing failure modes of the ratio are avoided. A blank weight uses the matched
+  scale, which reproduces the ratio to first order.
 
 ## Author and development
 

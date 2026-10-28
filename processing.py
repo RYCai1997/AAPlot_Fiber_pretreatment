@@ -23,7 +23,13 @@ class ProcessingConfig:
     wavelengths: list[str] = field(default_factory=list)
     analysis_wavelength: str = "470"
     reference_wavelength: str | None = "410"
-    combine: str = "ratio"  # ratio only
+    # "ratio": corrected_primary / corrected_reference.
+    # "difference": corrected_primary - weight * (corrected_reference - its level).
+    combine: str = "ratio"
+    # Weight of the reference channel in difference mode. None keeps the matched
+    # scale (primary level / reference level), which reproduces the ratio to first
+    # order but without dividing by a noisy reference.
+    reference_weight: float | None = None
     fit_model: str = "double_exponential"
     smooth_seconds: float = 10.0
     fit_regions: dict[str, list[tuple[float, float]]] = field(default_factory=dict)
@@ -453,6 +459,76 @@ def select_best_bleaching_model(
     return best_model, best_fitted, best_parameters, comparison
 
 
+def combine_channels(
+    primary: np.ndarray,
+    reference: np.ndarray,
+    mode: str,
+    weight: float | None,
+    primary_level: float,
+    reference_level: float,
+    primary_label: str = "470",
+    reference_label: str = "410",
+) -> tuple[np.ndarray, str, float, float]:
+    """Combine two corrected channels as a ratio or a weighted difference.
+
+    Returns ``(trace, label, reference_level, weight_used)``.
+
+    ``ratio`` returns ``primary / reference``; the level of that trace is
+    ``primary_level / reference_level``.
+
+    ``difference`` returns ``primary - weight * (reference - reference_level)``.
+    Only the deviation of the reference is removed, so the trace keeps the level
+    of the primary channel and dF/F0 still divides by ``primary_level``. The
+    default weight is the matched scale ``primary_level / reference_level``, which
+    is the first-order equivalent of the ratio without dividing by the reference.
+    """
+    if mode not in {"ratio", "difference"}:
+        raise ValueError(f"Unknown channel combination: {mode}")
+    primary = np.asarray(primary, float)
+    reference = np.asarray(reference, float)
+    if mode == "ratio":
+        if np.any(np.isfinite(reference) & np.isclose(reference, 0)):
+            raise ValueError(
+                f"The corrected {reference_label} trace contains zero, so the ratio cannot be calculated."
+            )
+        return (primary / reference, f"Corrected {primary_label} / {reference_label} ratio",
+                float(primary_level) / float(reference_level), 1.0)
+    if weight is None:
+        weight = float(primary_level) / float(reference_level)
+    weight = float(weight)
+    trace = primary - weight * (reference - float(reference_level))
+    label = (f"Corrected {primary_label} - {weight:.6g} x ({reference_label} - "
+             f"{float(reference_level):.6g})")
+    return trace, label, float(primary_level), weight
+
+
+def estimate_reference_weight(
+    primary: np.ndarray,
+    reference: np.ndarray,
+    mask: np.ndarray,
+    primary_level: float,
+    reference_level: float,
+) -> float:
+    """Robust weight for difference mode, fitted on samples without expected events.
+
+    Both traces are expressed as relative deviations from their own level, then a
+    single slope through the origin is fitted with a soft-L1 loss. Select ``mask``
+    over a stretch that contains artifacts but no expected transients; otherwise
+    the real signal is mistaken for an artifact and the weight is biased.
+    """
+    a = np.asarray(primary, float) / float(primary_level) - 1.0
+    b = np.asarray(reference, float) / float(reference_level) - 1.0
+    keep = np.asarray(mask, bool) & np.isfinite(a) & np.isfinite(b)
+    if keep.sum() < 20:
+        raise ValueError("Fewer than 20 valid samples are available to estimate the reference weight.")
+    a, b = a[keep], b[keep]
+    if np.dot(b, b) <= np.finfo(float).tiny:
+        raise ValueError("The reference channel does not vary; the weight cannot be estimated.")
+    result = least_squares(lambda p: p[0] * b - a, [float(np.dot(a, b) / np.dot(b, b))],
+                           loss="soft_l1", f_scale=float(np.median(np.abs(a - np.median(a))) or 1.0))
+    return float(result.x[0])
+
+
 def select_effective_data(data: pd.DataFrame, config: ProcessingConfig) -> pd.DataFrame:
     time_min = data["TimeStamp"].to_numpy(float) / 60000
     use = (time_min >= config.range_start_min) & (time_min <= config.range_end_min)
@@ -563,18 +639,16 @@ def process_data(
     combined = np.full(len(subset), np.nan)
     combined_label: str | None = None
     if reference is not None:
-        if np.any(np.isfinite(corrected[reference]) & np.isclose(corrected[reference], 0)):
-            raise ValueError(
-                f"The corrected {reference} trace contains zero, so the ratio cannot be calculated."
-            )
-        combined = corrected[primary] / corrected[reference]
-        combined_label = f"Corrected {primary} / {reference} ratio"
-        analysis_reference = (fit_parameters[primary]["correction_scale"]
-                              / fit_parameters[reference]["correction_scale"])
+        combined, combined_label, analysis_reference, weight_used = combine_channels(
+            corrected[primary], corrected[reference], config.combine, config.reference_weight,
+            fit_parameters[primary]["correction_scale"], fit_parameters[reference]["correction_scale"],
+            primary, reference,
+        )
         analysis_trace = combined.copy()
     else:
         analysis_trace = corrected[primary].copy()
         analysis_reference = fit_parameters[primary]["correction_scale"]
+        weight_used = None
 
     smooth_points = max(1, int(round(config.smooth_seconds * sample_rate)))
     combined_smoothed = (pd.Series(combined).rolling(smooth_points, center=True, min_periods=1).mean().to_numpy()
@@ -602,11 +676,18 @@ def process_data(
         "fit_parameters": fit_parameters,
         **{f"fit_{wavelength}_parameters": fit_parameters[wavelength] for wavelength in wavelengths},
         "analysis_reference_from_user_baselines": float(analysis_reference),
+        "combine": config.combine,
+        "reference_weight": None if weight_used is None else float(weight_used),
         "normalization": None,
         "source_channel": source,
         "definitions": {
             "baseline": "user value is either a fixed model constant or the initial estimate for a fitted constant, as recorded per channel",
             "corrected_channel": "(raw - offset) x (fitted at t0 / fitted); the bleaching factor is normalised to 1 at t0",
+            "combined_channel": {
+                "ratio": "corrected analysis / corrected reference",
+                "difference": "corrected analysis - weight x (corrected reference - its level); only the reference deviation is removed",
+            }[config.combine],
+            "reference_weight": "None means the matched scale (analysis level / reference level)",
             "fit_regions": "only samples inside the user-selected intervals are used for parameter estimation",
         },
     }

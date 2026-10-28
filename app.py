@@ -22,6 +22,7 @@ from processing import (
     available_recording_channels,
     calculate_event_locked_traces,
     calculate_normalized_traces,
+    combine_channels,
     fit_bleaching,
     load_recording,
     process_data,
@@ -34,7 +35,7 @@ DEFAULT_STRINGS = {
     "folder": "", "range_start": "0", "range_end": "0",
     "offset410": "0", "offset470": "0", "offset560": "0",
     "baseline410": "", "baseline470": "", "baseline560": "",
-    "combine": "ratio", "fit_model": "double_exponential", "smooth": "10",
+    "combine": "ratio", "reference_weight": "", "fit_model": "double_exponential", "smooth": "10",
     "fit410_status": "Not set", "fit470_status": "Not set", "fit560_status": "Not set",
     "norm_start": "0", "norm_end": "1",
     "norm_pre_duration": "5", "zero_time": "0", "downsample_value": "1",
@@ -61,6 +62,7 @@ LINE_WIDTH_LABELS = {
 }
 
 WAVELENGTHS = ("410", "470", "560")
+COMBINE_MODES = ("ratio", "difference")
 WAVELENGTH_COLORS = {
     "410": ("#4D8FCC", "#15558D"),
     "470": ("#4BAF72", "#006D3C"),
@@ -690,9 +692,17 @@ class PretreatmentApp:
         self.reference_wavelength_box.grid(row=row, column=1, sticky="ew"); row += 1
         self.reference_wavelength_box.bind("<<ComboboxSelected>>", lambda _event: self.analysis_selection_changed())
         ttk.Label(data_tab, text="Combine Channels").grid(row=row, column=0, sticky="w")
-        self.combine_box = ttk.Combobox(data_tab, textvariable=self.vars["combine"], values=["ratio"], state="readonly", width=19)
+        self.combine_box = ttk.Combobox(data_tab, textvariable=self.vars["combine"],
+                                        values=COMBINE_MODES, state="readonly", width=19)
         self.combine_box.grid(row=row, column=1, sticky="ew"); row += 1
         self.combine_box.bind("<<ComboboxSelected>>", lambda _event: self.combine_changed())
+        ttk.Label(data_tab, text="Reference Weight").grid(row=row, column=0, sticky="w")
+        self.reference_weight_entry = ttk.Entry(data_tab, textvariable=self.vars["reference_weight"],
+                                                width=12, state="disabled")
+        self.reference_weight_entry.grid(row=row, column=1, sticky="ew"); row += 1
+        ttk.Label(data_tab, text="Blank = matched scale (analysis level / reference level). "
+                                 "Used by the difference combination only.",
+                  wraplength=350, justify="left").grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 6)); row += 1
         ttk.Button(data_tab, text="Apply Correction", command=self.apply_processing, style="Accent.TButton").grid(row=row, column=0, columnspan=2, sticky="ew", pady=(8, 3)); row += 1
         row = self.section(data_tab, row, "Markers (Working Copy)")
         self.marker_list = tk.Listbox(data_tab, height=5, exportselection=False, relief="flat", highlightthickness=1)
@@ -957,6 +967,11 @@ class PretreatmentApp:
             raise ValueError(f"{key} must be a finite number.")
         return value
 
+    def optional_number(self, key: str) -> float | None:
+        if not self.vars[key].get().strip():
+            return None
+        return self.number(key)
+
     def set_x_axis_unit(self, unit: str) -> None:
         self.x_left_label_var.set(f"X Left ({unit})")
         self.x_range_label_var.set(f"X Range ({unit})")
@@ -1010,6 +1025,8 @@ class PretreatmentApp:
         self.line_width_selector_var.set(LINE_WIDTH_LABELS["raw470"])
         self.line_width_scale.configure(variable=self.line_width_vars["raw470"])
         self.line_width_text.set("1.0")
+        if hasattr(self, "reference_weight_entry"):
+            self.reference_weight_entry.configure(state="disabled")
         self.axis_scale_vars.clear()
         self.axis_lower_vars.clear()
         self.axis_upper_vars.clear()
@@ -1063,6 +1080,7 @@ class PretreatmentApp:
             analysis_wavelength=analysis,
             reference_wavelength=reference,
             combine=self.vars["combine"].get(),
+            reference_weight=self.optional_number("reference_weight"),
             fit_model=self.vars["fit_model"].get(),
             smooth_seconds=smooth_seconds,
             fit_regions={value: list(self.fit_regions[value]) for value in wavelengths},
@@ -1072,6 +1090,12 @@ class PretreatmentApp:
         )
         if config.range_end_min <= config.range_start_min:
             raise ValueError("The valid range end must be greater than the start.")
+        if config.combine not in COMBINE_MODES:
+            raise ValueError(f"Unknown channel combination: {config.combine}")
+        if config.combine == "difference" and config.reference_wavelength is None:
+            raise ValueError("The difference combination needs a reference wavelength.")
+        if config.reference_weight is not None and not np.isfinite(config.reference_weight):
+            raise ValueError("The reference weight must be a finite number.")
         if config.smooth_seconds < 0:
             raise ValueError("The smoothing duration cannot be negative.")
         return config
@@ -1351,6 +1375,10 @@ class PretreatmentApp:
             self.reference_wavelength_var.set("410" if "410" in references else "None")
         has_reference = self.reference_wavelength_var.get() != "None"
         self.combine_box.configure(state="readonly" if has_reference else "disabled")
+        if hasattr(self, "reference_weight_entry"):
+            self.reference_weight_entry.configure(
+                state="normal" if has_reference and self.vars["combine"].get() == "difference" else "disabled"
+            )
         self.refresh_event_signal_list(prefer_default=True)
         if self.event_trials is not None:
             self.clear_event_analysis("Analysis wavelength changed. Recalculate the event analysis.")
@@ -1364,9 +1392,12 @@ class PretreatmentApp:
             self.draw_raw_preview()
 
     def combine_changed(self) -> None:
-        """Refresh the raw preview or corrected ratio when the reference changes."""
+        """Refresh the raw preview or the corrected combination when the mode changes."""
         primary = self.analysis_wavelength_var.get()
         reference = self.reference_wavelength_var.get()
+        mode = self.vars["combine"].get()
+        if hasattr(self, "reference_weight_entry"):
+            self.reference_weight_entry.configure(state="normal" if mode == "difference" else "disabled")
         if reference in {"", "None"}:
             return
         if self.processed is None:
@@ -1377,22 +1408,23 @@ class PretreatmentApp:
             return
 
         from tkinter import messagebox
-        corrected_primary = self.processed[f"corrected_{primary}"].to_numpy(float)
-        corrected_reference = self.processed[f"corrected_{reference}"].to_numpy(float)
-        if np.any(np.isfinite(corrected_reference) & np.isclose(corrected_reference, 0)):
-            messagebox.showerror(
-                "Cannot Calculate Ratio",
-                f"The corrected {reference} trace contains zero, so the ratio cannot be calculated.",
-            )
-            return
-        combined = corrected_primary / corrected_reference
-        combined_label = f"Corrected {primary} / {reference} ratio"
         parameters = (self.details or {}).get("fit_parameters", {})
         if {primary, reference} <= set(parameters):
-            analysis_reference = (parameters[primary]["correction_scale"]
-                                  / parameters[reference]["correction_scale"])
+            primary_level = float(parameters[primary]["correction_scale"])
+            reference_level = float(parameters[reference]["correction_scale"])
         else:
-            analysis_reference = self.number(f"baseline{primary}") / self.number(f"baseline{reference}")
+            primary_level = self.number(f"baseline{primary}")
+            reference_level = self.number(f"baseline{reference}")
+        try:
+            combined, combined_label, analysis_reference, _weight = combine_channels(
+                self.processed[f"corrected_{primary}"].to_numpy(float),
+                self.processed[f"corrected_{reference}"].to_numpy(float),
+                mode, self.optional_number("reference_weight"),
+                primary_level, reference_level, primary, reference,
+            )
+        except ValueError as exc:
+            messagebox.showerror("Cannot Combine Channels", str(exc))
+            return
 
         self.processed["combined_signal"] = combined
         self.processed["analysis_trace"] = combined
@@ -1403,12 +1435,13 @@ class PretreatmentApp:
         self.display_cache.clear()
         if self.details is not None:
             self.details["combined_label"] = combined_label
+            self.details["combine"] = mode
             self.details["analysis_reference_from_user_baselines"] = float(analysis_reference)
             self.details["normalization"] = None
         self.rebuild_axes()
         self.draw_processed()
         self.vars["status"].set(
-            "Channel combination changed to the ratio. Recalculate dF/F0 and Z-score if needed."
+            f"Channel combination changed to {mode}. Recalculate dF/F0 and Z-score if needed."
         )
 
     def channel_changed(self) -> None:
