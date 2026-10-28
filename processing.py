@@ -1045,29 +1045,21 @@ def fitted_curve_from_parameters(parameters: dict[str, Any], time_s: np.ndarray)
 
 def load_saved_analysis(path: Path) -> dict[str, Any]:
     """Read one exported parameters file and add the values used for comparison."""
-    payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    if not isinstance(payload, dict) or not isinstance(payload.get("processing"), dict):
-        raise ValueError(f"{Path(path).name} is not an exported parameters file.")
+    path = Path(path)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{path.name} is not valid JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"{path.name} does not contain a JSON object.")
+    if not isinstance(payload.get("processing"), dict):
+        raise ValueError(
+            f"{path.name} has no 'processing' block, so it is not an exported "
+            f"{SAVED_ANALYSIS_FILE}."
+        )
     payload["_path"] = str(Path(path))
     payload["_config"] = config_from_saved(payload)
     return payload
-
-
-def find_saved_analysis(folder: Path) -> list[dict[str, Any]]:
-    """Every re-usable analysis under a recording folder, most recent first."""
-    folder = Path(folder)
-    candidates = [folder / SAVED_ANALYSIS_FILE]
-    candidates += sorted(folder.glob(f"*/{SAVED_ANALYSIS_FILE}"))
-    found: list[dict[str, Any]] = []
-    for path in candidates:
-        if not path.is_file():
-            continue
-        try:
-            found.append(load_saved_analysis(path))
-        except Exception:
-            continue
-    found.sort(key=lambda item: Path(item["_path"]).stat().st_mtime, reverse=True)
-    return found
 
 
 def _describe_regions(regions: Any) -> str:

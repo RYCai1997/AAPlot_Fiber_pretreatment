@@ -61,23 +61,30 @@ tab.
 
 ## Reusing a previous analysis
 
-When a recording folder already contains an exported analysis, the settings can be
-restored instead of typed in again, and only the parts that change are recomputed.
+A recording that was analysed before can be restored instead of typed in again, and only
+the parts that change are recomputed. The file is chosen explicitly: one mouse folder may
+hold several `output_*` folders, so nothing is read automatically.
 
-**Detection.** After a folder is loaded, the recording folder and its immediate
-subfolders are searched for `parameters_and_marker_edits.json`. Every valid file is
-collected and the newest one is offered first. **Reuse Saved Analysis...** becomes
-available, and the status line names the folder and timestamp that were found. Files
-without a `processing` block are ignored.
+**Choosing the file.** After a recording is loaded, **Restore From Saved JSON...** becomes
+available. It opens a normal file dialog whose start directory is the recording folder you
+loaded, or the folder of the last file you restored. The dialog lists every `.json` file in
+that directory, so navigate into `output_<recording>_<channel>[_suffix]` and pick the
+`parameters_and_marker_edits.json` you want. Cancel leaves everything untouched. A file that
+is not an exported parameters file — invalid JSON, or no `processing` block — is rejected
+with a message naming the reason, and no settings change.
 
-**Comparison.** The dialog lists one row per difference between the saved configuration and
-the current settings, with the saved value next to the current one. Rows whose scope is a
-wavelength are the ones that decide a refit. The summary above the table names the channels
-that still have a usable saved fit and the channels that would be fitted again. The data
-range is compared numerically, so the sampled end of a recording (`9.99944 min`) is not
-reported as different from `10 min`.
+**Comparison.** The chosen file opens a review window showing its full path, modification
+time and saved source channel, followed by one row per difference between the saved
+configuration and the current settings, with the saved value beside the current one. Rows
+whose scope is a wavelength decide whether that channel is fitted again. The summary above
+the table names the channels that still have a usable saved fit and the channels that would
+be refitted. The data range is compared numerically, so the sampled end of a recording
+(`9.99944 min`) is not reported as different from `10 min`.
 
-**Initialise.** **Initialise From Saved** writes the saved values into the interface:
+**Choose Another File...** reopens the file dialog from the review window, which is the
+quickest way to compare two outputs of the same recording before committing to one.
+
+**Initialise.** **Initialise From This File** writes the saved values into the interface:
 
 | Restored | Notes |
 | --- | --- |
@@ -374,12 +381,14 @@ Original input files are read-only and are never modified.
   removed, the analysis level and dF/F0 scaling are unchanged, and the reference-noise and
   zero-crossing failure modes of the ratio are avoided. A blank weight uses the matched
   scale, which reproduces the ratio to first order.
-- Added **Reuse Saved Analysis**. An exported `parameters_and_marker_edits.json` under the
-  recording folder is detected on load, compared parameter by parameter with the current
-  settings, and can be restored with one button. Saved fitted curves are rebuilt from their
-  parameters and seeded into the fit cache, so applying the restored configuration refits
-  only the channels whose fit inputs changed; changing the channel combination, the
-  reference weight or the smoothing refits nothing.
+- Added **Restore From Saved JSON**. After loading a recording, the button opens a file
+  dialog anchored at that recording folder so the user picks the exact
+  `parameters_and_marker_edits.json` to restore — one mouse folder can hold several
+  outputs. The file is compared parameter by parameter with the current settings before
+  anything is applied, and saved fitted curves are rebuilt from their parameters and seeded
+  into the fit cache, so applying the restored configuration refits only the channels whose
+  fit inputs changed; changing the channel combination, the reference weight or the
+  smoothing refits nothing.
 
 ## Author and development
 

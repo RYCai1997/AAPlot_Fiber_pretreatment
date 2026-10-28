@@ -29,7 +29,7 @@ from processing import (
     compare_configs,
     config_from_saved,
     estimate_reference_weight,
-    find_saved_analysis,
+    load_saved_analysis,
     fit_bleaching,
     fit_cache_key,
     fitted_curve_from_parameters,
@@ -553,8 +553,9 @@ class PretreatmentApp:
         self.initial_y_limits: dict[str, tuple[float, float]] = {}
         self.display_cache: dict[tuple[str, float], np.ndarray] = {}
         self.fit_cache: dict[Any, Any] = {}
-        self.saved_analyses: list[dict[str, Any]] = []
         self.saved_baseline: dict[str, Any] | None = None
+        self.last_saved_dir: str | None = None
+        self.pending_saved_analysis: dict[str, Any] | None = None
         self.last_applied_config: ProcessingConfig | None = None
         self.fit_job: threading.Thread | None = None
         self.pending_config: ProcessingConfig | None = None
@@ -664,9 +665,9 @@ class PretreatmentApp:
         row = 0
         ttk.Button(data_tab, text="Select Recording Folder", command=self.open_folder, style="Accent.TButton").grid(row=row, column=0, columnspan=2, sticky="ew"); row += 1
         ttk.Label(data_tab, textvariable=self.vars["folder"], wraplength=350).grid(row=row, column=0, columnspan=2, sticky="w", pady=(3, 9)); row += 1
-        self.reuse_button = ttk.Button(data_tab, text="Reuse Saved Analysis...", command=self.open_saved_analysis,
-                                       state="disabled")
-        self.reuse_button.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(0, 6)); row += 1
+        self.restore_button = ttk.Button(data_tab, text="Restore From Saved JSON...",
+                                         command=self.open_saved_analysis, state="disabled")
+        self.restore_button.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(0, 6)); row += 1
         ttk.Label(data_tab, text="Recording Channel").grid(row=row, column=0, sticky="w")
         self.source_channel_box = ttk.Combobox(data_tab, textvariable=self.source_channel_var,
                                                values=["CH1"], state="readonly", width=19)
@@ -1069,9 +1070,9 @@ class PretreatmentApp:
         self.fit_cache.clear()
         self.last_applied_config = None
         self.saved_baseline = None
-        self.saved_analyses = []
-        if hasattr(self, "reuse_button"):
-            self.reuse_button.configure(state="disabled")
+        self.pending_saved_analysis = None
+        if hasattr(self, "restore_button"):
+            self.restore_button.configure(state="disabled")
 
     def clear_event_analysis(self, message: str | None = None) -> None:
         """Discard event results when their corrected source signal or marker set changes."""
@@ -1349,34 +1350,15 @@ class PretreatmentApp:
             self.vars["norm_end"].set(f"{min(1.0, recording_end):.5f}")
             self.vars["output_name"].set(f"output_{self.folder.name}_{self.source_channel_var.get()}")
             self.refresh_markers(); self.analysis_selection_changed()
-            saved = self.refresh_saved_analysis()
-            if saved:
-                path = Path(saved[0]["_path"])
-                self.vars["status"].set(
-                    f"Data loaded with wavelengths {', '.join(self.available_wavelengths)}. "
-                    f"An earlier analysis was found ({path.parent.name}, "
-                    f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(path.stat().st_mtime))}). "
-                    "Click Reuse Saved Analysis to compare and restore it."
-                )
-            else:
-                self.vars["status"].set(
-                    f"Data loaded with wavelengths {', '.join(self.available_wavelengths)}. "
-                    "Enter each visible baseline and set its fitting regions."
-                )
+            if hasattr(self, "restore_button"):
+                self.restore_button.configure(state="normal")
+            self.vars["status"].set(
+                f"Data loaded with wavelengths {', '.join(self.available_wavelengths)}. "
+                "Enter each visible baseline and set its fitting regions, or click "
+                "Restore From Saved JSON to load the settings of an earlier analysis."
+            )
         except Exception as exc:
             messagebox.showerror("Load Failed", str(exc))
-
-    def refresh_saved_analysis(self) -> list[dict[str, Any]]:
-        """Find exported analyses under the current recording folder."""
-        self.saved_analyses = []
-        if self.folder is not None:
-            try:
-                self.saved_analyses = find_saved_analysis(self.folder)
-            except Exception:  # noqa: BLE001 - a broken file must not block loading
-                self.saved_analyses = []
-        if hasattr(self, "reuse_button"):
-            self.reuse_button.configure(state="normal" if self.saved_analyses else "disabled")
-        return self.saved_analyses
 
     def parsed_number(self, key: str, default: Any = None) -> Any:
         text = self.vars[key].get().strip()
@@ -1414,100 +1396,116 @@ class PretreatmentApp:
             source_channel=self.source_channel_var.get(),
         )
 
+    def choose_saved_analysis_file(self) -> Path | None:
+        """Ask for one exported parameters file. Any folder can be used."""
+        from tkinter import filedialog, messagebox
+        initial = self.last_saved_dir
+        if initial is None:
+            initial = str(self.folder) if self.folder is not None else ""
+        selected = filedialog.askopenfilename(
+            title="Select a saved parameters file",
+            initialdir=initial or None,
+            filetypes=[("Exported parameters", "*.json"), ("All files", "*.*")],
+        )
+        if not selected:
+            return None
+        path = Path(selected)
+        self.last_saved_dir = str(path.parent)
+        try:
+            payload = load_saved_analysis(path)
+        except Exception as exc:  # noqa: BLE001 - explained to the user
+            messagebox.showerror(
+                "Cannot Read That File",
+                f"{path}\n\n{exc}\n\nChoose a {SAVED_ANALYSIS_FILE} written by "
+                "Export Results.",
+            )
+            return None
+        self.pending_saved_analysis = payload
+        return path
+
     def open_saved_analysis(self) -> None:
+        """Let the user pick one saved JSON, then compare and restore it."""
         import tkinter as tk
         from tkinter import messagebox, ttk
-        if not self.saved_analyses:
-            messagebox.showinfo(
-                "No Saved Analysis",
-                f"No {SAVED_ANALYSIS_FILE} was found under this recording folder.",
-            )
+        if self.data is None:
+            messagebox.showinfo("Load Data First", "Open a recording folder before restoring a saved analysis.")
             return
+        if self.choose_saved_analysis_file() is None:
+            return
+        payload = self.pending_saved_analysis
+        if not isinstance(payload, dict):
+            return
+        path = Path(payload["_path"])
         window = tk.Toplevel(self.root)
-        window.title("Reuse Saved Analysis")
-        window.geometry("860x560")
+        window.title("Restore From Saved JSON")
+        window.geometry("880x580")
         window.transient(self.root)
         frame = ttk.Frame(window, padding=10)
         frame.pack(fill="both", expand=True)
         frame.columnconfigure(0, weight=1)
-        frame.rowconfigure(4, weight=1)
+        frame.rowconfigure(3, weight=1)
 
-        if len(self.saved_analyses) > 1:
-            choices = [
-                f"{Path(item['_path']).parent.name}  |  "
-                f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(Path(item['_path']).stat().st_mtime))}"
-                for item in self.saved_analyses
-            ]
-            selector = ttk.Combobox(frame, values=choices, state="readonly")
-            selector.current(0)
-            selector.grid(row=0, column=0, sticky="ew", pady=(0, 6))
-        else:
-            selector = None
-
-        path_label = ttk.Label(frame, text="", wraplength=820, justify="left")
-        path_label.grid(row=1, column=0, sticky="w")
-        summary_label = ttk.Label(frame, text="", wraplength=820, justify="left")
-        summary_label.grid(row=2, column=0, sticky="w", pady=(4, 8))
-        header = ttk.Label(
+        path_label = ttk.Label(frame, text="", wraplength=840, justify="left")
+        path_label.grid(row=0, column=0, sticky="w")
+        summary_label = ttk.Label(frame, text="", wraplength=840, justify="left")
+        summary_label.grid(row=1, column=0, sticky="w", pady=(4, 8))
+        ttk.Label(
             frame,
             text="Parameters that differ from the current settings. Initialising overwrites "
-                 "the current values; unchanged channels keep their saved fit.",
-            wraplength=820, justify="left",
-        )
-        header.grid(row=3, column=0, sticky="w", pady=(0, 4))
+                 "the current values; channels whose fitting inputs are unchanged keep their "
+                 "saved fit.",
+            wraplength=840, justify="left",
+        ).grid(row=2, column=0, sticky="w", pady=(0, 4))
 
         table = ttk.Treeview(frame, columns=("scope", "parameter", "saved", "current"),
-                             show="headings", height=14)
-        for name, width in (("scope", 80), ("parameter", 200), ("saved", 250), ("current", 250)):
+                             show="headings", height=15)
+        for name, width in (("scope", 80), ("parameter", 210), ("saved", 260), ("current", 260)):
             table.heading(name, text=name.capitalize())
             table.column(name, width=width, anchor="w")
-        table.grid(row=4, column=0, sticky="nsew")
+        table.grid(row=3, column=0, sticky="nsew")
         scrollbar = ttk.Scrollbar(frame, orient="vertical", command=table.yview)
-        scrollbar.grid(row=4, column=1, sticky="ns")
+        scrollbar.grid(row=3, column=1, sticky="ns")
         table.configure(yscrollcommand=scrollbar.set)
 
         buttons = ttk.Frame(frame)
-        buttons.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(10, 0))
-        apply_button = ttk.Button(buttons, text="Initialise From Saved", style="Accent.TButton")
+        buttons.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+
+        def choose_another() -> None:
+            window.destroy()
+            self.open_saved_analysis()
+
+        apply_button = ttk.Button(
+            buttons, text="Initialise From This File", style="Accent.TButton",
+            command=lambda: (self.initialize_from_saved(payload), window.destroy()),
+        )
         apply_button.pack(side="left")
+        ttk.Button(buttons, text="Choose Another File...", command=choose_another).pack(side="left", padx=6)
         ttk.Button(buttons, text="Close", command=window.destroy).pack(side="right")
 
-        def show(index: int) -> None:
-            payload = self.saved_analyses[index]
-            path = Path(payload["_path"])
-            path_label.configure(text=f"Source: {path}")
-            try:
-                rows = compare_configs(payload["_config"], self.current_config_snapshot())
-            except Exception as exc:  # noqa: BLE001
-                rows = []
-                summary_label.configure(text=f"The saved parameters could not be compared: {exc}")
-            table.delete(*table.get_children())
-            for row in rows:
-                table.insert("", "end", values=(row["scope"], row["parameter"],
-                                                row["saved"], row["current"]))
-            channels = sorted(changed_fit_channels(payload["_config"], self.current_config_snapshot()))
-            details = payload.get("fit_details") or {}
-            reusable = [channel for channel in payload["_config"].wavelengths
-                        if isinstance((details.get("fit_parameters") or {}).get(channel), dict)]
-            summary_label.configure(
-                text=(f"{len(rows)} difference(s). Saved fits available for "
-                      f"{', '.join(reusable) if reusable else 'no channel'}"
-                      + (f"; channels that would need a refit: {', '.join(channels)}" if channels else
-                         "; every channel can reuse its saved fit.")
-                      + (" No differences: the current settings already match this analysis."
-                         if not rows else ""))
-            )
-
-        def on_select(_event: Any = None) -> None:
-            show(selector.current() if selector is not None else 0)
-
-        if selector is not None:
-            selector.bind("<<ComboboxSelected>>", on_select)
-        apply_button.configure(
-            command=lambda: (self.initialize_from_saved(
-                self.saved_analyses[selector.current() if selector is not None else 0]), window.destroy())
+        current = self.current_config_snapshot()
+        try:
+            rows = compare_configs(payload["_config"], current)
+        except Exception as exc:  # noqa: BLE001 - shown instead of raising
+            rows = []
+            summary_label.configure(text=f"The saved parameters could not be compared: {exc}")
+        path_label.configure(
+            text=(f"Source: {path}\nModified: "
+                  f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(path.stat().st_mtime))}"
+                  f"  |  saved source channel: {payload['_config'].source_channel}")
         )
-        show(0)
+        for row in rows:
+            table.insert("", "end", values=(row["scope"], row["parameter"], row["saved"], row["current"]))
+        channels = sorted(changed_fit_channels(payload["_config"], current))
+        details = payload.get("fit_details") or {}
+        reusable = [channel for channel in payload["_config"].wavelengths
+                    if isinstance((details.get("fit_parameters") or {}).get(channel), dict)]
+        summary_label.configure(
+            text=(f"{len(rows)} difference(s). Saved fits available for "
+                  f"{', '.join(reusable) if reusable else 'no channel'}"
+                  + (f"; channels that need a refit after initialising: {', '.join(channels)}" if channels
+                     else "; every channel can reuse its saved fit.")
+                  + (" The current settings already match this file." if not rows else ""))
+        )
 
     def restore_saved_markers(self, edits: dict[str, Any]) -> None:
         """Re-apply the marker edits recorded with a saved analysis."""
