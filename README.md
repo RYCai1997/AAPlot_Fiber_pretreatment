@@ -47,7 +47,7 @@ fit, correction, dF/F0, Z-score, plotting, and export support as 410 and 470.
 ## Workflow
 
 1. Click **Select Recording Folder**, choose the **Recording Channel**, and set the
-   **Valid Data Range (min)** used for fitting and correction.
+   **Valid Data Range** used for fitting and correction.
 2. For every visible wavelength, enter its **Offset** and **Fitting Baseline**, then open
    **Configure <wavelength> Fit...** to select one or more fitting regions and the model.
 3. Choose the **Analysis Wavelength** and, optionally, a **Reference Wavelength**. With a
@@ -116,6 +116,15 @@ A channel falls back to a fresh fit when its saved model differs from the model 
 selected, when the saved parameters are missing, or when the saved fitted curve does not
 match the current data range. Those channels appear in the "refit needed" list before the
 initialisation is applied.
+
+## Time units
+
+Every duration or timestamp field has an **s / min** selector next to it. Each field opens
+in the unit it was designed for — data range, normalisation baseline, marker time and export
+window in minutes; smoothing, event windows and the estimate exclusion windows in seconds —
+and switching the selector converts the number so the duration stays the same (`10` min
+becomes `600` s and back). Values are always read in the unit currently shown, so the same
+recording can be analysed with windows typed either way.
 
 ## Correction and fitting
 
@@ -218,11 +227,13 @@ because it works on the corrected traces and on the two channels' `correction_sc
 values. Clicking it runs the following steps.
 
 **1. Build the fitting sample.** Start from every sample where both corrected traces are
-finite, then remove each marker window: from `marker − event_pre_seconds` to
-`marker + event_post_seconds`. Artifacts stay in the sample; expected transients do not. The
-status line reports how many samples survive. With no markers the whole trace is used and
-the status line warns that expected transients may bias the weight low; if fewer than
-20 samples remain, nothing is estimated and an error is shown.
+finite, then remove each marker window: from `marker − Exclude Before Marker` to
+`marker + Exclude After Marker`, defaults 5 s and 60 s. These two fields sit under the
+weight and are **independent of the Event Analysis window**, so the weight does not change
+when the event window is retuned later. Artifacts stay in the sample; expected transients do
+not. The status line reports how many samples survive. With no markers the whole trace is
+used and the status line warns that expected transients may bias the weight low; if fewer
+than 20 samples remain, nothing is estimated and an error is shown.
 
 **2. Convert both channels to relative deviations**, so a bright and a dim channel become
 comparable and the DC levels drop out:
@@ -266,7 +277,7 @@ above. Validation example: `matched = 1.524`, fitted `k = 0.333`, reported `w = 
 0.28 %, and the event amplitude moved only from 8.84 % to 8.74 %.
 
 **5. Report and verify.** The field is filled and the combination is recomputed
-immediately. The status line prints the sample count, the number of marker windows and the
+immediately. The status line prints the sample count, the exclusion window actually used and the
 matched scale for comparison. Then check three things: the artifact stretch flattens, the
 event amplitude matches the matched-scale run (if it drops, the reference is carrying real
 signal and `w` is eating biology), and `w` stays positive. A weight far below the matched
@@ -468,6 +479,12 @@ Original input files are read-only and are never modified.
   into the fit cache, so applying the restored configuration refits only the channels whose
   fit inputs changed; changing the channel combination, the reference weight or the
   smoothing refits nothing.
+- Added an **s / min** selector to every time field (data range, smoothing, normalisation
+  baseline, marker time, event windows, estimate exclusion, export window). Switching the
+  unit converts the value in place, so the duration is unchanged.
+- The **Estimate** exclusion window is now set by its own two fields under the weight,
+  defaulting to 5 s before and 60 s after each marker, instead of borrowing the Event
+  Analysis window. Retuning the event window no longer moves the weight.
 - `difference` is now the default channel combination; `ratio` remains selectable for
   comparisons with earlier analyses.
 - The window opens at a size derived from the screen (up to 1860x1180) with a smaller
@@ -479,7 +496,9 @@ Original input files are read-only and are never modified.
   results are cleared when the combination changes, because they were computed from the
   previous trace.
 - The **Reference Weight** field now has an **Estimate** button. It fits the weight on all
-  samples outside the marker windows, converts the result to the count scale of the field,
+  samples outside the estimate exclusion windows (default 5 s before and 60 s after each
+  marker, set independently of the Event Analysis window), converts the result to the count
+  scale of the field,
   and reports the matched scale beside it for comparison. The algorithm, its unit
   conversion and the acceptance checks are written out in
   **Choosing the reference weight**. In a synthetic recording whose

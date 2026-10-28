@@ -51,6 +51,7 @@ DEFAULT_STRINGS = {
     "norm_pre_duration": "5", "zero_time": "0", "downsample_value": "1",
     "export_window_duration": "5",
     "event_pre_seconds": "5", "event_post_seconds": "30", "event_baseline_seconds": "5",
+    "estimate_exclude_before": "5", "estimate_exclude_after": "60",
     "event_status": "Select a marker name after loading data.",
     "x_start": "", "x_span": "", "x_end": "", "output_name": "",
     "marker_time": "0", "marker_name": "marker", "status": "Select a recording folder.",
@@ -73,6 +74,17 @@ LINE_WIDTH_LABELS = {
 
 WAVELENGTHS = ("410", "470", "560")
 COMBINE_MODES = ("difference", "ratio")
+TIME_UNITS = ("s", "min")
+# Fields the user edits as a duration or a timestamp, with their startup unit.
+TIME_FIELD_UNITS = {
+    "range_start": "min", "range_end": "min",
+    "smooth": "s",
+    "norm_start": "min", "norm_end": "min", "norm_pre_duration": "min",
+    "zero_time": "min", "marker_time": "min",
+    "event_pre_seconds": "s", "event_post_seconds": "s", "event_baseline_seconds": "s",
+    "estimate_exclude_before": "s", "estimate_exclude_after": "s",
+    "export_window_duration": "min",
+}
 WAVELENGTH_COLORS = {
     "410": ("#4D8FCC", "#15558D"),
     "470": ("#4BAF72", "#006D3C"),
@@ -570,6 +582,8 @@ class PretreatmentApp:
         self.axis_drag_state: dict[str, Any] | None = None
         self.box_drag_active = False
         self.vars = {key: tk.StringVar(value=value) for key, value in DEFAULT_STRINGS.items()}
+        self.time_unit_vars = {key: tk.StringVar(value=unit) for key, unit in TIME_FIELD_UNITS.items()}
+        self.time_unit_previous = dict(TIME_FIELD_UNITS)
         self.trace_view_var = tk.StringVar(value="overlay")
         self.show_fit_var = tk.BooleanVar(value=True)
         self.line_width_vars = {key: tk.DoubleVar(value=1.0) for key in LINE_WIDTH_LABELS}
@@ -673,7 +687,7 @@ class PretreatmentApp:
         self.source_channel_box.grid(row=row, column=1, sticky="ew"); row += 1
         self.source_channel_box.bind("<<ComboboxSelected>>", lambda _event: self.channel_changed())
         row = self.section(data_tab, row, "Valid Data Range (min)")
-        row = self.entry(data_tab, row, "Start", "range_start"); row = self.entry(data_tab, row, "End", "range_end")
+        row = self.add_time_entry(data_tab, row, "Start", "range_start"); row = self.add_time_entry(data_tab, row, "End", "range_end")
         row = self.section(data_tab, row, "Offsets & Fitting Baselines")
         self.wavelength_frames: dict[str, Any] = {}
         for wavelength in WAVELENGTHS:
@@ -725,14 +739,20 @@ class PretreatmentApp:
                                                  state="disabled")
         self.estimate_weight_button.grid(row=0, column=1, sticky="e", padx=(4, 0))
         ttk.Label(data_tab, text="Blank = matched scale (analysis level / reference level). "
-                                 "Estimate fits the weight on all samples outside the marker "
-                                 "windows and needs an applied correction.",
+                                 "Estimate needs an applied correction and uses the exclusion "
+                                 "windows below.",
                   wraplength=350, justify="left").grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 6)); row += 1
+        row = self.add_time_entry(data_tab, row, "Exclude Before Marker", "estimate_exclude_before")
+        row = self.add_time_entry(data_tab, row, "Exclude After Marker", "estimate_exclude_after")
+        ttk.Label(data_tab, text="Every marker is excluded on both sides before the weight is "
+                                 "fitted. Defaults: 5 before, 60 after.",
+                  style="Hint.TLabel", wraplength=350, justify="left").grid(
+                      row=row, column=0, columnspan=2, sticky="w", pady=(0, 6)); row += 1
         ttk.Button(data_tab, text="Apply Correction", command=self.apply_processing, style="Accent.TButton").grid(row=row, column=0, columnspan=2, sticky="ew", pady=(8, 3)); row += 1
         row = self.section(data_tab, row, "Markers (Working Copy)")
         self.marker_list = tk.Listbox(data_tab, height=5, exportselection=False, relief="flat", highlightthickness=1)
         self.marker_list.grid(row=row, column=0, columnspan=2, sticky="nsew", pady=(2, 5)); row += 1
-        row = self.entry(data_tab, row, "Time (min)", "marker_time"); row = self.entry(data_tab, row, "Name", "marker_name")
+        row = self.add_time_entry(data_tab, row, "Time", "marker_time"); row = self.entry(data_tab, row, "Name", "marker_name")
         marker_buttons = ttk.Frame(data_tab); marker_buttons.grid(row=row, column=0, columnspan=2, sticky="ew")
         for text, command in [("Add", self.add_marker), ("Delete", self.delete_marker), ("Restore Original", self.reset_markers)]:
             ttk.Button(marker_buttons, text=text, command=command).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=1)
@@ -749,7 +769,7 @@ class PretreatmentApp:
         row = self.section(display_tab, row, "Smoothing & Downsampling")
         ttk.Checkbutton(display_tab, text="Enable Smoothing", variable=self.smooth_enabled_var).grid(
             row=row, column=0, columnspan=2, sticky="w"); row += 1
-        row = self.entry(display_tab, row, "Smoothing Window (s)", "smooth")
+        row = self.add_time_entry(display_tab, row, "Smoothing Window", "smooth")
         ttk.Checkbutton(display_tab, text="Enable Downsampling", variable=self.downsample_enabled_var).grid(
             row=row, column=0, columnspan=2, sticky="w"); row += 1
         ttk.Label(display_tab, text="Downsampling Unit").grid(row=row, column=0, sticky="w")
@@ -764,13 +784,13 @@ class PretreatmentApp:
                         value="manual").pack(side=tk.LEFT)
         ttk.Radiobutton(baseline_modes, text="Pre-Marker Interval", variable=self.norm_mode_var,
                         value="marker_before").pack(side=tk.LEFT)
-        row = self.entry(display_tab, row, "Baseline Start (original min)", "norm_start")
-        row = self.entry(display_tab, row, "Baseline End (original min)", "norm_end")
+        row = self.add_time_entry(display_tab, row, "Baseline Start (original)", "norm_start")
+        row = self.add_time_entry(display_tab, row, "Baseline End (original)", "norm_end")
         ttk.Label(display_tab, text="Baseline Marker").grid(row=row, column=0, sticky="w")
         self.norm_marker_box = ttk.Combobox(display_tab, textvariable=self.norm_marker_var,
                                             state="readonly", width=20)
         self.norm_marker_box.grid(row=row, column=1, sticky="ew"); row += 1
-        row = self.entry(display_tab, row, "Pre-Marker Duration (min)", "norm_pre_duration")
+        row = self.add_time_entry(display_tab, row, "Pre-Marker Duration", "norm_pre_duration")
         row = self.section(display_tab, row, "Relative Time (Optional)")
         ttk.Checkbutton(display_tab, text="Enable Relative Time", variable=self.zero_enabled_var).grid(
             row=row, column=0, columnspan=2, sticky="w"); row += 1
@@ -781,7 +801,7 @@ class PretreatmentApp:
         self.zero_marker_box = ttk.Combobox(display_tab, textvariable=self.zero_marker_var,
                                             state="readonly", width=20)
         self.zero_marker_box.grid(row=row, column=1, sticky="ew"); row += 1
-        row = self.entry(display_tab, row, "Specified Time (original min)", "zero_time")
+        row = self.add_time_entry(display_tab, row, "Specified Time (original)", "zero_time")
         ttk.Button(display_tab, text="Calculate dF/F0 & Z-score", command=self.calculate_normalization,
                    style="Accent.TButton").grid(row=row, column=0, columnspan=2, sticky="ew", pady=(5, 2)); row += 1
         ttk.Label(display_tab, text="Drag the bottom X-axis to pan horizontally. Drag a plot's left Y-axis to pan vertically. Box zoom works inside plots.",
@@ -850,9 +870,9 @@ class PretreatmentApp:
         ttk.Button(event_marker_buttons, text="Clear Selection", command=self.clear_event_marker_selection).pack(
             side=tk.LEFT, fill=tk.X, expand=True, padx=(1, 0),
         )
-        row = self.entry(event_tab, row, "Trace Before Marker (s)", "event_pre_seconds")
-        row = self.entry(event_tab, row, "Trace After Marker (s)", "event_post_seconds")
-        row = self.entry(event_tab, row, "Baseline Before Marker (s)", "event_baseline_seconds")
+        row = self.add_time_entry(event_tab, row, "Trace Before Marker", "event_pre_seconds")
+        row = self.add_time_entry(event_tab, row, "Trace After Marker", "event_post_seconds")
+        row = self.add_time_entry(event_tab, row, "Baseline Before Marker", "event_baseline_seconds")
         ttk.Label(
             event_tab,
             text="Select any number of markers with Ctrl/Shift-click (all are selected by default). "
@@ -908,7 +928,7 @@ class PretreatmentApp:
         ttk.Label(export_tab, text="Annotation Marker").grid(row=row, column=0, sticky="w")
         self.export_marker_box = ttk.Combobox(export_tab, textvariable=self.export_marker_var, state="readonly", width=20)
         self.export_marker_box.grid(row=row, column=1, sticky="ew"); row += 1
-        row = self.entry(export_tab, row, "Marker Window (min)", "export_window_duration")
+        row = self.add_time_entry(export_tab, row, "Marker Window", "export_window_duration")
         ttk.Label(export_tab, text="The selected region is shaded in PNG files and recorded as export_window in CSV files.", wraplength=380, style="Hint.TLabel").grid(row=row, column=0, columnspan=2, sticky="w"); row += 1
         row = self.entry(export_tab, row, "Output Folder Name", "output_name")
         ttk.Label(export_tab, text="The output folder is created inside the input folder. A number is appended if the name already exists.",
@@ -975,6 +995,49 @@ class PretreatmentApp:
         self.ttk.Label(parent, text=text, style="Section.TLabel").grid(
             row=row, column=0, columnspan=2, sticky="w", pady=(0, 3)
         )
+        return row + 1
+
+    def time_factor(self, key: str) -> float:
+        """Seconds per unit currently selected for a time field."""
+        return 60.0 if self.time_unit_vars[key].get().startswith("min") else 1.0
+
+    def time_seconds(self, key: str, default_seconds: float | None = None) -> float | None:
+        value = self.parsed_number(key)
+        return default_seconds if value is None else float(value) * self.time_factor(key)
+
+    def time_minutes(self, key: str, default_minutes: float | None = None) -> float | None:
+        value = self.parsed_number(key)
+        return default_minutes if value is None else float(value) * self.time_factor(key) / 60.0
+
+    def set_time_value(self, key: str, seconds: float) -> None:
+        """Write a duration into a field, converted to its currently selected unit."""
+        self.vars[key].set(f"{float(seconds) / self.time_factor(key):.6g}")
+
+    def convert_time_unit(self, key: str) -> None:
+        """Keep the same duration when the unit of a field changes."""
+        previous = self.time_unit_previous.get(key, "s")
+        current = self.time_unit_vars[key].get()
+        self.time_unit_previous[key] = current
+        if previous == current:
+            return
+        value = self.parsed_number(key)
+        if value is None:
+            return
+        self.set_time_value(key, float(value) * (60.0 if previous.startswith("min") else 1.0))
+
+    def add_time_entry(self, parent: Any, row: int, label: str, key: str) -> int:
+        """Entry with an s / min selector; the value is always stored in the shown unit."""
+        import tkinter as tk
+        from tkinter import ttk
+        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=2)
+        holder = ttk.Frame(parent)
+        holder.grid(row=row, column=1, sticky="ew", pady=2)
+        holder.columnconfigure(0, weight=1)
+        ttk.Entry(holder, textvariable=self.vars[key], width=10).grid(row=0, column=0, sticky="ew")
+        selector = ttk.Combobox(holder, textvariable=self.time_unit_vars[key], values=TIME_UNITS,
+                                state="readonly", width=5)
+        selector.grid(row=0, column=1, padx=(4, 0))
+        selector.bind("<<ComboboxSelected>>", lambda _event, k=key: self.convert_time_unit(k))
         return row + 1
 
     def entry(self, parent: Any, row: int, label: str, key: str) -> int:
@@ -1051,6 +1114,9 @@ class PretreatmentApp:
         """Restore every analysis, display and export option to its startup default."""
         for key, value in DEFAULT_STRINGS.items():
             self.vars[key].set(value)
+        for key, unit in TIME_FIELD_UNITS.items():
+            self.time_unit_vars[key].set(unit)
+            self.time_unit_previous[key] = unit
         self.trace_view_var.set("overlay")
         self.show_fit_var.set(True)
         self.box_drag_active = False
@@ -1146,8 +1212,8 @@ class PretreatmentApp:
         reference_text = self.reference_wavelength_var.get()
         reference = None if reference_text in {"", "None"} else reference_text
         config = ProcessingConfig(
-            range_start_min=self.number("range_start"),
-            range_end_min=self.number("range_end"),
+            range_start_min=self.time_minutes("range_start"),
+            range_end_min=self.time_minutes("range_end"),
             offsets={value: self.number(f"offset{value}") for value in wavelengths},
             baselines={value: self.number(f"baseline{value}") for value in wavelengths},
             wavelengths=wavelengths,
@@ -1175,7 +1241,7 @@ class PretreatmentApp:
         return config
 
     def pending_smoothing_seconds(self) -> float:
-        value = self.number("smooth") if self.smooth_enabled_var.get() else 0.0
+        value = self.time_seconds("smooth") if self.smooth_enabled_var.get() else 0.0
         if value < 0:
             raise ValueError("The smoothing window cannot be negative.")
         return value
@@ -1393,12 +1459,12 @@ class PretreatmentApp:
             self.original_markers = [dict(marker) for marker in markers]
             self.markers = [dict(marker) for marker in markers]
             self.vars["folder"].set(str(self.folder))
-            self.vars["range_start"].set("0")
+            self.set_time_value("range_start", 0.0)
             recording_end = float(self.data["TimeStamp"].iloc[-1]) / 60000
             self.channel_ranges = {channel: (0.0, recording_end) for channel in channels}
-            self.vars["range_end"].set(f"{recording_end:.5f}")
-            self.vars["norm_start"].set("0")
-            self.vars["norm_end"].set(f"{min(1.0, recording_end):.5f}")
+            self.set_time_value("range_end", recording_end * 60.0)
+            self.set_time_value("norm_start", 0.0)
+            self.set_time_value("norm_end", min(1.0, recording_end) * 60.0)
             self.vars["output_name"].set(f"output_{self.folder.name}_{self.source_channel_var.get()}")
             self.refresh_markers(); self.analysis_selection_changed()
             if hasattr(self, "restore_button"):
@@ -1441,8 +1507,8 @@ class PretreatmentApp:
         mask = np.isfinite(time_min) & np.isfinite(
             self.processed[f"corrected_{primary}"].to_numpy(float)) & np.isfinite(
             self.processed[f"corrected_{reference}"].to_numpy(float))
-        pre = max(0.0, self.parsed_number("event_pre_seconds", 5.0))
-        post = max(0.0, self.parsed_number("event_post_seconds", 30.0))
+        pre = max(0.0, self.time_seconds("estimate_exclude_before", 5.0))
+        post = max(0.0, self.time_seconds("estimate_exclude_after", 60.0))
         excluded = 0
         for marker in self.markers:
             window = ((time_min >= marker["time_min"] - pre / 60.0)
@@ -1455,8 +1521,8 @@ class PretreatmentApp:
         elif mask.sum() < 20:
             messagebox.showerror(
                 "Not Enough Sample Left",
-                "The marker windows cover the recording. Remove some markers or shorten the event "
-                "window in Event Analysis, then try again.",
+                "The exclusion windows cover the recording. Remove some markers or shorten the "
+                "estimate exclusion window, then try again.",
             )
             return
         try:
@@ -1476,7 +1542,8 @@ class PretreatmentApp:
         self.combine_changed()
         self.vars["status"].set(
             f"Reference weight {weight:.4g} from {int(mask.sum()):,} samples outside "
-            f"{len(self.markers)} marker window(s); matched scale is {matched:.4g}.{note}"
+            f"{len(self.markers)} exclusion window(s) ({pre:g} s before, {post:g} s after each "
+            f"marker); matched scale is {matched:.4g}.{note}"
         )
 
     def parsed_number(self, key: str, default: Any = None) -> Any:
@@ -1498,8 +1565,8 @@ class PretreatmentApp:
         wavelengths = list(self.available_wavelengths) or ["470"]
         reference = self.reference_wavelength_var.get()
         return ProcessingConfig(
-            range_start_min=self.parsed_number("range_start", 0.0),
-            range_end_min=self.parsed_number("range_end", 1.0),
+            range_start_min=self.time_minutes("range_start", 0.0),
+            range_end_min=self.time_minutes("range_end", 1.0),
             offsets={value: self.parsed_number(f"offset{value}", 0.0) for value in wavelengths},
             baselines={value: self.parsed_number(f"baseline{value}", 0.0) for value in wavelengths},
             wavelengths=wavelengths,
@@ -1508,7 +1575,7 @@ class PretreatmentApp:
             combine=self.vars["combine"].get(),
             reference_weight=self.parsed_number("reference_weight"),
             fit_model=self.vars["fit_model"].get(),
-            smooth_seconds=(self.parsed_number("smooth", 0.0) if self.smooth_enabled_var.get() else 0.0),
+            smooth_seconds=(self.time_seconds("smooth", 0.0) if self.smooth_enabled_var.get() else 0.0),
             fit_regions={value: list(self.fit_regions[value]) for value in wavelengths},
             fit_models={value: self.fit_models[value] for value in wavelengths},
             fit_baseline_modes={value: self.fit_baseline_modes[value] for value in wavelengths},
@@ -1706,8 +1773,8 @@ class PretreatmentApp:
                 self.source_channel_var.set(source)
                 self.active_source_channel = source
                 self.configure_available_wavelengths(source)
-            self.vars["range_start"].set(f"{config.range_start_min:g}")
-            self.vars["range_end"].set(f"{config.range_end_min:g}")
+            self.set_time_value("range_start", config.range_start_min * 60.0)
+            self.set_time_value("range_end", config.range_end_min * 60.0)
             for channel in self.available_wavelengths:
                 self.vars[f"offset{channel}"].set(f"{config.offsets.get(channel, 0.0):g}")
                 self.vars[f"baseline{channel}"].set(f"{config.baselines.get(channel, 0.0):g}")
@@ -1731,16 +1798,16 @@ class PretreatmentApp:
             self.vars["fit_model"].set(config.fit_model)
             if config.smooth_seconds > 0:
                 self.smooth_enabled_var.set(True)
-                self.vars["smooth"].set(f"{config.smooth_seconds:g}")
+                self.set_time_value("smooth", config.smooth_seconds)
             else:
                 self.smooth_enabled_var.set(False)
 
             normalization = (payload.get("fit_details") or {}).get("normalization") or {}
             if normalization:
                 if normalization.get("baseline_start_min") is not None:
-                    self.vars["norm_start"].set(f"{float(normalization['baseline_start_min']):g}")
+                    self.set_time_value("norm_start", float(normalization["baseline_start_min"]) * 60.0)
                 if normalization.get("baseline_end_min") is not None:
-                    self.vars["norm_end"].set(f"{float(normalization['baseline_end_min']):g}")
+                    self.set_time_value("norm_end", float(normalization["baseline_end_min"]) * 60.0)
                 self.norm_mode_var.set("manual")
 
             self.restore_saved_markers(payload.get("marker_edits") or {})
@@ -1888,7 +1955,7 @@ class PretreatmentApp:
         # not been visited starts at the full recording range instead of
         # inheriting another channel's analysis interval.
         try:
-            prior_start, prior_end = self.number("range_start"), self.number("range_end")
+            prior_start, prior_end = self.time_minutes("range_start"), self.time_minutes("range_end")
             if prior_end > prior_start:
                 self.channel_ranges[self.active_source_channel] = (prior_start, prior_end)
         except ValueError:
@@ -1896,8 +1963,8 @@ class PretreatmentApp:
         recording_end = float(self.data["TimeStamp"].iloc[-1]) / 60000
         start, end = self.channel_ranges.get(source, (0.0, recording_end))
         self.channel_ranges[source] = (start, end)
-        self.vars["range_start"].set(f"{start:.5f}")
-        self.vars["range_end"].set(f"{end:.5f}")
+        self.set_time_value("range_start", start * 60.0)
+        self.set_time_value("range_end", end * 60.0)
         self.active_source_channel = source
         # Store the selected value before any redraw.  This avoids a queued
         # canvas draw retaining CH1's processed artists during a CH2 switch.
@@ -2450,7 +2517,7 @@ class PretreatmentApp:
         self.set_x_axis_unit("min")
         source = source or self.source_channel_var.get()
         try:
-            start, end = self.number("range_start"), self.number("range_end")
+            start, end = self.time_minutes("range_start"), self.time_minutes("range_end")
         except Exception:
             return
         if end <= start:
@@ -2940,7 +3007,7 @@ class PretreatmentApp:
 
     def add_marker(self) -> None:
         try:
-            self.markers.append({"id": str(uuid.uuid4()), "time_min": self.number("marker_time"),
+            self.markers.append({"id": str(uuid.uuid4()), "time_min": self.time_minutes("marker_time"),
                                  "name": self.vars["marker_name"].get().strip() or "marker", "source": "manual"})
             self.clear_event_analysis("Marker list changed. Recalculate the event analysis.")
             self.refresh_markers(); self.redraw_current()
@@ -2985,10 +3052,10 @@ class PretreatmentApp:
 
     def resolve_baseline_interval(self) -> tuple[float, float, dict[str, Any]]:
         if self.norm_mode_var.get() == "manual":
-            start, end = self.number("norm_start"), self.number("norm_end")
+            start, end = self.time_minutes("norm_start"), self.time_minutes("norm_end")
             return start, end, {"mode": "manual"}
         marker_time = self.marker_time_from_choice(self.norm_marker_var.get())
-        duration = self.number("norm_pre_duration")
+        duration = self.time_minutes("norm_pre_duration")
         if duration <= 0:
             raise ValueError("The pre-marker baseline duration must be greater than 0.")
         return marker_time - duration, marker_time, {
@@ -3002,7 +3069,7 @@ class PretreatmentApp:
         if self.zero_mode_var.get() == "marker":
             value = self.marker_time_from_choice(self.zero_marker_var.get())
             return value, {"enabled": True, "mode": "marker", "marker": self.zero_marker_var.get()}
-        value = self.number("zero_time")
+        value = self.time_minutes("zero_time")
         return value, {"enabled": True, "mode": "time", "original_time_min": value}
 
     def current_event_settings(
@@ -3017,9 +3084,9 @@ class PretreatmentApp:
         selected_signals = self.selected_event_signals()
         if not selected_signals:
             raise ValueError("Select at least one signal for event analysis.")
-        pre_seconds = self.number("event_pre_seconds")
-        post_seconds = self.number("event_post_seconds")
-        baseline_seconds = self.number("event_baseline_seconds")
+        pre_seconds = self.time_seconds("event_pre_seconds")
+        post_seconds = self.time_seconds("event_post_seconds")
+        baseline_seconds = self.time_seconds("event_baseline_seconds")
         if pre_seconds <= 0 or post_seconds <= 0 or baseline_seconds <= 0:
             raise ValueError("Event trace and baseline durations must be greater than 0 seconds.")
         if baseline_seconds > pre_seconds:
@@ -3562,7 +3629,7 @@ class PretreatmentApp:
             return (start - shift, end - shift), "normalization_baseline"
         if mode == "marker_after":
             start = self.marker_time_from_choice(self.export_marker_var.get())
-            duration = self.number("export_window_duration")
+            duration = self.time_minutes("export_window_duration")
             if duration <= 0:
                 raise ValueError("The marker-window duration must be greater than 0.")
             return (start - shift, start + duration - shift), "marker_after_window"
