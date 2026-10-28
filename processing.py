@@ -24,9 +24,9 @@ class ProcessingConfig:
     wavelengths: list[str] = field(default_factory=list)
     analysis_wavelength: str = "470"
     reference_wavelength: str | None = "410"
-    # "ratio": corrected_primary / corrected_reference.
     # "difference": corrected_primary - weight * (corrected_reference - its level).
-    combine: str = "ratio"
+    # "ratio": corrected_primary / corrected_reference.
+    combine: str = "difference"
     # Weight of the reference channel in difference mode. None keeps the matched
     # scale (primary level / reference level), which reproduces the ratio to first
     # order but without dividing by a noisy reference.

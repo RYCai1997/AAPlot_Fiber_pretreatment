@@ -153,19 +153,11 @@ where the trace was anchored.
 ### Channel combination
 
 Two combinations are available; both produce the analysis trace that dF/F0 and Z-score are
-computed from.
+computed from. **Difference is the default**, because a reference that reacts to artifacts
+more strongly than its own level implies is over-subtracted by a ratio and can turn a
+positive deflection negative. **Ratio** stays available for comparisons with earlier work.
 
-**Ratio** (`combine = ratio`)
-
-```
-analysis(t) = C_analysis(t) / C_reference(t)
-dF/F0(t)    = 100 · (analysis(t) − analysis₀) / analysis₀ ,   analysis₀ = F_analysis(t₀) / F_reference(t₀)
-```
-
-Equivalent to `100 · [(1+a)/(1+b) − 1]` with `a` and `b` the relative deviations of the two
-channels, so it removes a fluctuation that is proportional to each channel's own level.
-
-**Difference** (`combine = difference`)
+**Difference** (`combine = difference`, default)
 
 ```
 analysis(t) = C_analysis(t) − w · (C_reference(t) − F_reference(t₀))
@@ -181,6 +173,16 @@ Weight** field:
 - a number → that weight. Use it when the reference reacts to artifacts more or less
   strongly than its own level implies.
 - `w = 0` → the reference is ignored (equivalent to no reference).
+
+**Ratio** (`combine = ratio`)
+
+```
+analysis(t) = C_analysis(t) / C_reference(t)
+dF/F0(t)    = 100 · (analysis(t) − analysis₀) / analysis₀ ,   analysis₀ = F_analysis(t₀) / F_reference(t₀)
+```
+
+Equivalent to `100 · [(1+a)/(1+b) − 1]` with `a` and `b` the relative deviations of the two
+channels, so it removes a fluctuation that is proportional to each channel's own level.
 
 | | Ratio | Difference |
 | --- | --- | --- |
@@ -466,6 +468,11 @@ Original input files are read-only and are never modified.
   into the fit cache, so applying the restored configuration refits only the channels whose
   fit inputs changed; changing the channel combination, the reference weight or the
   smoothing refits nothing.
+- `difference` is now the default channel combination; `ratio` remains selectable for
+  comparisons with earlier analyses.
+- The window opens at a size derived from the screen (up to 1860x1180) with a smaller
+  minimum, and every notebook tab scrolls vertically, so a long tab is never clipped. The
+  fitting window and the restore dialog were enlarged and made resizable as well.
 - Event analysis now uses the stored combination trace instead of recomputing a ratio of
   its own, so switching between `ratio` and `difference` and changing the reference weight
   flow through to the trial traces, the mean ± SEM curves and the exported columns. Those

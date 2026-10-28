@@ -45,7 +45,7 @@ DEFAULT_STRINGS = {
     "folder": "", "range_start": "0", "range_end": "0",
     "offset410": "0", "offset470": "0", "offset560": "0",
     "baseline410": "", "baseline470": "", "baseline560": "",
-    "combine": "ratio", "reference_weight": "", "fit_model": "double_exponential", "smooth": "10",
+    "combine": "difference", "reference_weight": "", "fit_model": "double_exponential", "smooth": "10",
     "fit410_status": "Not set", "fit470_status": "Not set", "fit560_status": "Not set",
     "norm_start": "0", "norm_end": "1",
     "norm_pre_duration": "5", "zero_time": "0", "downsample_value": "1",
@@ -72,7 +72,7 @@ LINE_WIDTH_LABELS = {
 }
 
 WAVELENGTHS = ("410", "470", "560")
-COMBINE_MODES = ("ratio", "difference")
+COMBINE_MODES = ("difference", "ratio")
 WAVELENGTH_COLORS = {
     "410": ("#4D8FCC", "#15558D"),
     "470": ("#4BAF72", "#006D3C"),
@@ -103,7 +103,8 @@ class FitWindow:
         self.markers = [dict(marker) for marker in markers]
         self.window = tk.Toplevel(parent)
         self.window.title(f"{channel} Fitting Regions")
-        self.window.geometry("1200x760")
+        self.window.geometry("1440x920")
+        self.window.minsize(1000, 700)
         subset = select_effective_data(data, config)
         self.time_s = subset["TimeStamp"].to_numpy(float) / 1000
         self.time_min = self.time_s / 60
@@ -516,8 +517,9 @@ class PretreatmentApp:
         self.tk, self.ttk, self.root = tk, ttk, root
         self.RectangleSelector = RectangleSelector
         root.title("RWD Fiber Pretreatment — Fiber Photometry")
-        root.geometry("1650x950")
-        root.minsize(1120, 720)
+        width, height = self.initial_window_size(root, 1860, 1180)
+        root.geometry(f"{width}x{height}")
+        root.minsize(min(1240, width), min(780, height))
         self.folder: Path | None = None
         self.data: pd.DataFrame | None = None
         self.metadata = ""
@@ -612,6 +614,7 @@ class PretreatmentApp:
             "accent_active": "#255d86", "text": "#263746", "muted": "#657786",
             "tab": "#dfe7ee", "border": "#ccd6df",
         }
+        self.palette = palette
         root.configure(background=palette["window"])
         style = ttk.Style(root)
         if "clam" in style.theme_names():
@@ -653,14 +656,10 @@ class PretreatmentApp:
                   style="HeaderSubtitle.TLabel").pack(anchor="w", pady=(1, 0))
         notebook = ttk.Notebook(controls)
         notebook.pack(fill=tk.BOTH, expand=True)
-        data_tab = ttk.Frame(notebook, padding=12)
-        display_tab = ttk.Frame(notebook, padding=12)
-        event_tab = ttk.Frame(notebook, padding=12)
-        export_tab = ttk.Frame(notebook, padding=12)
-        notebook.add(data_tab, text="Data & Fitting")
-        notebook.add(display_tab, text="Full trace analysis")
-        notebook.add(event_tab, text="Event Analysis")
-        notebook.add(export_tab, text="Export Results")
+        data_tab = self.make_scrollable_tab(notebook, "Data & Fitting")
+        display_tab = self.make_scrollable_tab(notebook, "Full trace analysis")
+        event_tab = self.make_scrollable_tab(notebook, "Event Analysis")
+        export_tab = self.make_scrollable_tab(notebook, "Export Results")
 
         row = 0
         ttk.Button(data_tab, text="Select Recording Folder", command=self.open_folder, style="Accent.TButton").grid(row=row, column=0, columnspan=2, sticky="ew"); row += 1
@@ -968,6 +967,7 @@ class PretreatmentApp:
         self.canvas.mpl_connect("figure_leave_event", self.axis_drag_release)
         self.canvas.mpl_connect("figure_leave_event", self.hover_leave)
         self.canvas.mpl_connect("draw_event", self.cache_hover_background)
+        self.sync_reference_weight_state()
         self.rebuild_axes()
 
     def section(self, parent: Any, row: int, text: str) -> int:
@@ -983,6 +983,50 @@ class PretreatmentApp:
             row=row, column=1, sticky="ew", pady=2
         )
         return row + 1
+
+    @staticmethod
+    def initial_window_size(window: Any, preferred_width: int, preferred_height: int,
+                            margin: int = 40) -> tuple[int, int]:
+        """Clamp a preferred window size to the screen so the layout is never cut off."""
+        try:
+            screen_width = int(window.winfo_screenwidth())
+            screen_height = int(window.winfo_screenheight())
+        except Exception:  # noqa: BLE001 - fall back to the preferred size
+            return preferred_width, preferred_height
+        width = min(preferred_width, max(1000, screen_width - margin * 2))
+        height = min(preferred_height, max(700, screen_height - margin * 4))
+        return width, height
+
+    def make_scrollable_tab(self, notebook: Any, text: str, padding: int = 12) -> Any:
+        """Add a notebook tab whose content scrolls instead of being clipped."""
+        import tkinter as tk
+        from tkinter import ttk
+        outer = ttk.Frame(notebook)
+        canvas = tk.Canvas(outer, highlightthickness=0, borderwidth=0,
+                           background=self.palette["window"])
+        scrollbar = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        inner = ttk.Frame(canvas, padding=padding)
+        window = canvas.create_window((0, 0), window=inner, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        def fit_width(_event: Any = None) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            canvas.itemconfigure(window, width=max(canvas.winfo_width(), 1))
+
+        inner.bind("<Configure>", fit_width)
+        canvas.bind("<Configure>", fit_width)
+
+        def on_wheel(event: Any) -> None:
+            if isinstance(event.widget, (tk.Listbox, tk.Text, ttk.Treeview)):
+                return  # these keep their own scrolling
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        canvas.bind("<Enter>", lambda _event: canvas.bind_all("<MouseWheel>", on_wheel))
+        canvas.bind("<Leave>", lambda _event: canvas.unbind_all("<MouseWheel>"))
+        notebook.add(outer, text=text)
+        return inner
 
     def number(self, key: str) -> float:
         try:
@@ -1513,7 +1557,8 @@ class PretreatmentApp:
         path = Path(payload["_path"])
         window = tk.Toplevel(self.root)
         window.title("Restore From Saved JSON")
-        window.geometry("880x580")
+        window.geometry("1020x720")
+        window.minsize(760, 520)
         window.transient(self.root)
         frame = ttk.Frame(window, padding=10)
         frame.pack(fill="both", expand=True)
@@ -2727,7 +2772,7 @@ class PretreatmentApp:
             else:
                 label = f"Ratio {analysis}/{reference}"
             choices.append({
-                "key": f"ratio:{analysis}/{reference}",
+                "key": f"combined:{analysis}/{reference}",
                 "label": label,
                 "kind": "combined",
                 "column": "combined_signal",
@@ -2760,7 +2805,7 @@ class PretreatmentApp:
             if prefer_default or not had_candidates:
                 analysis = self.analysis_wavelength_var.get()
                 reference = self.reference_wavelength_var.get()
-                default_key = (f"ratio:{analysis}/{reference}"
+                default_key = (f"combined:{analysis}/{reference}"
                                if reference not in {"", "None"}
                                else f"wavelength:{analysis}")
                 default_index = next(
