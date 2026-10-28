@@ -12,7 +12,9 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from scipy import sparse
 from scipy.optimize import least_squares
+from scipy.sparse.linalg import spsolve
 
 
 @dataclass
@@ -36,6 +38,9 @@ class ProcessingConfig:
     fit_regions: dict[str, list[tuple[float, float]]] = field(default_factory=dict)
     fit_models: dict[str, str | None] = field(default_factory=dict)
     fit_baseline_modes: dict[str, str | None] = field(default_factory=dict)
+    # Penalised-least-squares settings, per wavelength (used when the model is "penalized").
+    fit_betas: dict[str, float | None] = field(default_factory=dict)
+    fit_lambdas: dict[str, float | None] = field(default_factory=dict)
     source_channel: str = "CH1"
 
 
@@ -57,6 +62,15 @@ OPTIMIZER_TOLERANCE = 1e-6
 # slower, but it reproduces the historical curves bit for bit when a narrow fit
 # region leaves the two-exponential solution under-determined.
 FIT_EXACT = os.environ.get("AAPLOT_FIT_EXACT", "").strip().lower() in {"1", "true", "yes", "on"}
+
+# Penalised least squares ("PLS fit"). The weight sharpness and the smoothing
+# strength are capped at the values that stay stable on a steep initial decay.
+PLS_DEFAULT_BETA = 8.0
+PLS_MAX_BETA = 8.0
+PLS_DEFAULT_LAMBDA = 10.0
+PLS_MAX_LAMBDA = 10.0
+PLS_MAX_POINTS = 1200
+PLS_KNOT_COUNT = 200
 
 # Per-start and final budgets of the historical implementation, kept identical
 # so that a converged solution does not change (only the screening stage is new).
@@ -245,6 +259,8 @@ def fit_bleaching(
     model: str,
     fit_mask: np.ndarray,
     baseline_mode: str = "fixed",
+    beta: float = PLS_DEFAULT_BETA,
+    lam: float = PLS_DEFAULT_LAMBDA,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Fit one channel using only selected regions.
 
@@ -267,6 +283,36 @@ def fit_bleaching(
     xf, yf = x[valid_indices[keep]], y[valid_indices[keep]]
     xs: np.ndarray | None = None
     ys: np.ndarray | None = None
+    if model == "penalized":
+        # A global smoother, so every sample is used rather than only the regions;
+        # the regions still decide which samples score the fit.
+        fitted, parameters = fit_penalized_baseline(x, y, beta=beta, lam=lam)
+        score_indices = valid_indices[sample_indices(len(valid_indices), 2000)]
+        residuals = y[score_indices] - fitted[score_indices]
+        rss = max(float(np.sum(residuals ** 2)), np.finfo(float).tiny)
+        score_n = len(score_indices)
+        parameter_count = 2
+        bic = score_n * np.log(rss / score_n) + parameter_count * np.log(score_n)
+        aic = score_n * np.log(rss / score_n) + 2 * parameter_count
+        parameters.update({
+            "baseline_mode": baseline_mode,
+            "fit_samples": int(valid.sum()),
+            "score_samples": int(score_n),
+            "cost": float(np.sqrt(rss / score_n)),
+            "rss_selected": rss,
+            "rmse_selected": float(np.sqrt(rss / score_n)),
+            "bic_selected": float(bic),
+            "aicc_selected": float(aic),
+            "optimizer_success": True,
+            "optimizer_status": 0,
+            "optimizer_message": "iteratively reweighted penalised least squares",
+            "optimizer_nfev": int(parameters.get("iterations", 0)),
+            "optimizer_optimality": 0.0,
+            "optimizer_active_mask": [0, 0],
+            "fit_warnings": [],
+        })
+        return fitted, parameters
+
     spread = max(float(np.percentile(yf, 99) - np.percentile(yf, 1)), 1e-6)
     differences = np.diff(yf)
     noise = max(1.4826 * float(np.median(np.abs(differences - np.median(differences)))), spread * 1e-4)
@@ -555,11 +601,13 @@ def fit_cache_key(
     regions: Any,
     range_start_min: float,
     range_end_min: float,
+    beta: float | None = None,
+    lam: float | None = None,
 ) -> tuple[Any, ...]:
     """Signature of one channel fit. Two runs share a fit only when it matches."""
     return (data_token, source, column, model, baseline_mode, offset, baseline,
             tuple(tuple(region) for region in regions),
-            float(range_start_min), float(range_end_min))
+            float(range_start_min), float(range_end_min), beta, lam)
 
 
 def process_data(
@@ -610,14 +658,22 @@ def process_data(
         mask = region_mask(time_min, regions)
         model = config.fit_models.get(wavelength) or config.fit_model
         baseline_mode = config.fit_baseline_modes.get(wavelength) or "fit_constant"
+        beta = config.fit_betas.get(wavelength)
+        lam = config.fit_lambdas.get(wavelength)
         cache_key = fit_cache_key(data_token, source, column, model, baseline_mode, offset, baseline,
-                                  regions, config.range_start_min, config.range_end_min)
+                                  regions, config.range_start_min, config.range_end_min,
+                                  None if beta is None else float(beta),
+                                  None if lam is None else float(lam))
         cached = cache.get(cache_key) if cache is not None else None
         if cached is not None:
             fitted, parameters = cached[0], copy.deepcopy(cached[1])
             parameters["fit_reused_from_cache"] = True
         else:
-            fitted, parameters = fit_bleaching(time_s, adjusted, baseline, model, mask, baseline_mode)
+            fitted, parameters = fit_bleaching(
+                time_s, adjusted, baseline, model, mask, baseline_mode,
+                beta=PLS_DEFAULT_BETA if beta is None else float(beta),
+                lam=PLS_DEFAULT_LAMBDA if lam is None else float(lam),
+            )
             parameters["fit_reused_from_cache"] = False
             if cache is not None:
                 if len(cache) >= 12:
@@ -1025,8 +1081,87 @@ def config_from_saved(payload: dict[str, Any]) -> ProcessingConfig:
                      for key, value in (processing.get("fit_regions") or {}).items()},
         fit_models={key: value for key, value in (processing.get("fit_models") or {}).items()},
         fit_baseline_modes={key: value for key, value in (processing.get("fit_baseline_modes") or {}).items()},
+        fit_betas={key: _as_float(value) for key, value in (processing.get("fit_betas") or {}).items()},
+        fit_lambdas={key: _as_float(value) for key, value in (processing.get("fit_lambdas") or {}).items()},
         source_channel=str(processing.get("source_channel") or default.source_channel),
     )
+
+
+def fit_penalized_baseline(
+    time_s: np.ndarray,
+    values: np.ndarray,
+    beta: float = PLS_DEFAULT_BETA,
+    lam: float = PLS_DEFAULT_LAMBDA,
+    max_points: int = PLS_MAX_POINTS,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Lower-envelope bleaching baseline by iteratively reweighted penalised LS.
+
+    The trace is fitted in log space with a second-difference (Whittaker)
+    penalty, and samples that sit above the current fit are progressively
+    down-weighted, so upward transients end up excluded from the baseline while
+    the decay is still followed. Working in log space keeps a steep initial decay
+    representable by a single smoothing strength.
+
+    ``beta`` sharpens the asymmetric weighting (higher = closer to the lower
+    envelope) and ``lam`` sets the smoothing strength; both are clamped to the
+    stable range. Long recordings are decimated before fitting and the result is
+    interpolated back, which is the down-sampling variant of the same algorithm.
+    """
+    x = np.asarray(time_s, float)
+    x = x - float(x[0])
+    y = np.asarray(values, float)
+    keep = np.isfinite(x) & np.isfinite(y)
+    x, y = x[keep], y[keep]
+    if x.size < 50:
+        raise ValueError("Fewer than 50 valid samples are available for the PLS fit.")
+    beta = float(np.clip(beta, 1.0, PLS_MAX_BETA))
+    lam = float(np.clip(lam, 1e-2, PLS_MAX_LAMBDA))
+
+    index = sample_indices(x.size, max_points)
+    grid_x, grid_y = x[index], y[index]
+    floor = max(float(np.percentile(grid_y, 99)) * 1e-3, 1e-6)
+    logged = np.log(np.maximum(grid_y, floor))
+    n = logged.size
+    sigma = float(np.median(np.abs(np.diff(logged)))) / 0.6745 / np.sqrt(2.0)
+    sigma = max(sigma, 1e-9)
+    lam_scaled = lam * (n / 1000.0) ** 2
+
+    difference = sparse.diags([1.0, -2.0, 1.0], [0, 1, 2], shape=(n - 2, n), format="csr")
+    penalty = lam_scaled * (difference.T @ difference)
+
+    def solve(weights: np.ndarray) -> np.ndarray:
+        system = sparse.diags(weights, 0, shape=(n, n), format="csr") + penalty
+        return spsolve(system.tocsr(), weights * logged)
+
+    weights = np.ones(n)
+    fitted_log = solve(weights)
+    span = max(float(np.ptp(logged)), 1e-9)
+    iterations = 0
+    for iterations in range(1, 41):
+        residual = logged - fitted_log
+        weights = np.maximum(np.exp(-beta * np.maximum(residual, 0.0) / sigma), 1e-8)
+        updated = solve(weights)
+        if float(np.max(np.abs(updated - fitted_log))) < 1e-7 * span:
+            fitted_log = updated
+            break
+        fitted_log = updated
+
+    fitted_grid = np.exp(fitted_log)
+    fitted = np.interp(x, grid_x, fitted_grid)
+    knot_index = sample_indices(n, PLS_KNOT_COUNT)
+    parameters: dict[str, Any] = {
+        "model": "penalized",
+        "beta": beta,
+        "lambda": lam,
+        "lambda_scaled": float(lam_scaled),
+        "noise_sigma_log": sigma,
+        "iterations": int(iterations),
+        "fit_points": int(n),
+        "downsampled": bool(n < x.size),
+        "curve_knots_t": [float(value) for value in grid_x[knot_index]],
+        "curve_knots_z": [float(value) for value in fitted_grid[knot_index]],
+    }
+    return fitted, parameters
 
 
 def fitted_curve_from_parameters(parameters: dict[str, Any], time_s: np.ndarray) -> np.ndarray:
@@ -1034,6 +1169,12 @@ def fitted_curve_from_parameters(parameters: dict[str, Any], time_s: np.ndarray)
     x = np.asarray(time_s, float)
     x = x - x[0]
     model = parameters.get("model")
+    if model == "penalized":
+        knots_t = parameters.get("curve_knots_t")
+        knots_z = parameters.get("curve_knots_z")
+        if not knots_t or not knots_z:
+            raise ValueError("The saved PLS fit has no stored curve knots.")
+        return np.interp(x, np.asarray(knots_t, float), np.asarray(knots_z, float))
     constant = parameters.get("fitted_constant")
     if constant is None:
         constant = parameters.get("fixed_baseline", 0.0)
@@ -1124,6 +1265,9 @@ def compare_configs(
             current.fit_baseline_modes.get(channel) or "fit_constant")
         add(channel, "fitting regions", _describe_regions(saved.fit_regions.get(channel)),
             _describe_regions(current.fit_regions.get(channel)))
+        if (saved.fit_models.get(channel) or saved.fit_model) == "penalized":
+            add(channel, "PLS beta", saved.fit_betas.get(channel), current.fit_betas.get(channel))
+            add(channel, "PLS lambda", saved.fit_lambdas.get(channel), current.fit_lambdas.get(channel))
     return rows
 
 

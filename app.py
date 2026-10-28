@@ -156,10 +156,20 @@ class FitWindow:
         ttk.Label(left, text="Bleaching model").pack(anchor="w")
         self.model_box = ttk.Combobox(
             left, textvariable=self.model_var,
-            values=["linear", "single_exponential", "double_exponential"], state="readonly",
+            values=["linear", "single_exponential", "double_exponential", "penalized"], state="readonly",
         )
         self.model_box.pack(fill=tk.X, pady=(0, 7))
         self.model_box.bind("<<ComboboxSelected>>", self.invalidate_preview)
+        ttk.Label(left, text="PLS beta (1-8) / lambda (0.01-10)").pack(anchor="w", pady=(4, 0))
+        pls_row = ttk.Frame(left)
+        pls_row.pack(fill=tk.X, pady=(0, 7))
+        self.beta_var = tk.StringVar(value=f"{float(config.fit_betas.get(channel) or 8.0):g}")
+        self.lambda_var = tk.StringVar(value=f"{float(config.fit_lambdas.get(channel) or 10.0):g}")
+        for variable, width in ((self.beta_var, 5), (self.lambda_var, 5)):
+            entry = ttk.Entry(pls_row, textvariable=variable, width=width)
+            entry.pack(side=tk.LEFT, padx=(0, 4))
+            entry.bind("<KeyRelease>", self.invalidate_preview)
+        ttk.Label(pls_row, text="used by the PLS fit only").pack(side=tk.LEFT)
         ttk.Label(left, text="The baseline initializes the freely fitted constant (fit_constant).",
                   wraplength=250).pack(anchor="w", pady=(0, 5))
         self.add_button = ttk.Button(left, text="Add Region", command=self.add_region)
@@ -373,7 +383,7 @@ class FitWindow:
 
         def on_ok(_fitted: Any, _parameters: dict[str, Any]) -> None:
             self.on_accept(self.channel, list(self.regions), self.signature(), self.selected_model,
-                           self.selected_baseline_mode)
+                           self.selected_baseline_mode, self.selected_beta(), self.selected_lambda())
             self.window.destroy()
 
         self.start_async_fit(mask, on_ok)
@@ -392,6 +402,20 @@ class FitWindow:
         except Exception:
             pass
 
+    def selected_beta(self) -> float:
+        try:
+            value = float(self.beta_var.get())
+        except ValueError:
+            value = 8.0
+        return float(np.clip(value, 1.0, 8.0))
+
+    def selected_lambda(self) -> float:
+        try:
+            value = float(self.lambda_var.get())
+        except ValueError:
+            value = 10.0
+        return float(np.clip(value, 0.01, 10.0))
+
     def fit_snapshot(self) -> tuple[Any, ...]:
         return (self.signature(), tuple((float(start), float(end)) for start, end in self.regions))
 
@@ -401,7 +425,7 @@ class FitWindow:
         self.fit_queue = result_queue
         snapshot = self.fit_snapshot()
         args = (self.time_s, self.values, self.baseline, self.selected_model, mask,
-                self.selected_baseline_mode)
+                self.selected_baseline_mode, self.selected_beta(), self.selected_lambda())
 
         def worker() -> None:
             try:
@@ -543,6 +567,8 @@ class PretreatmentApp:
         self.fit_signatures: dict[str, tuple[Any, ...] | None] = {wavelength: None for wavelength in WAVELENGTHS}
         self.fit_models: dict[str, str | None] = {wavelength: None for wavelength in WAVELENGTHS}
         self.fit_baseline_modes: dict[str, str | None] = {wavelength: "fit_constant" for wavelength in WAVELENGTHS}
+        self.fit_betas: dict[str, float | None] = {wavelength: None for wavelength in WAVELENGTHS}
+        self.fit_lambdas: dict[str, float | None] = {wavelength: None for wavelength in WAVELENGTHS}
         self.recording_channels: dict[str, list[str]] = {}
         self.available_wavelengths: list[str] = []
         self.active_source_channel = "CH1"
@@ -1172,6 +1198,8 @@ class PretreatmentApp:
         self.fit_signatures = {wavelength: None for wavelength in WAVELENGTHS}
         self.fit_models = {wavelength: None for wavelength in WAVELENGTHS}
         self.fit_baseline_modes = {wavelength: "fit_constant" for wavelength in WAVELENGTHS}
+        self.fit_betas = {wavelength: None for wavelength in WAVELENGTHS}
+        self.fit_lambdas = {wavelength: None for wavelength in WAVELENGTHS}
         self.recording_channels = {}
         self.available_wavelengths = []
         self.active_source_channel = "CH1"
@@ -1226,6 +1254,8 @@ class PretreatmentApp:
             fit_regions={value: list(self.fit_regions[value]) for value in wavelengths},
             fit_models={value: self.fit_models[value] for value in wavelengths},
             fit_baseline_modes={value: self.fit_baseline_modes[value] for value in wavelengths},
+            fit_betas={value: self.fit_betas[value] for value in wavelengths},
+            fit_lambdas={value: self.fit_lambdas[value] for value in wavelengths},
             source_channel=self.source_channel_var.get(),
         )
         if config.range_end_min <= config.range_start_min:
@@ -1751,11 +1781,14 @@ class PretreatmentApp:
                 skipped.append(channel)
                 continue
             baseline_mode = config.fit_baseline_modes.get(channel) or "fit_constant"
+            beta = config.fit_betas.get(channel)
+            lam = config.fit_lambdas.get(channel)
             key = fit_cache_key(
                 token, source, f"{source}-{channel}", model, baseline_mode,
                 float(config.offsets[channel]), float(config.baselines[channel]),
                 [tuple(region) for region in config.fit_regions.get(channel) or []],
                 config.range_start_min, config.range_end_min,
+                None if beta is None else float(beta), None if lam is None else float(lam),
             )
             stored = copy.deepcopy(parameters)
             stored["model"] = model
@@ -1785,6 +1818,8 @@ class PretreatmentApp:
                 self.fit_regions[channel] = [tuple(region) for region in config.fit_regions.get(channel) or []]
                 self.fit_models[channel] = config.fit_models.get(channel) or config.fit_model
                 self.fit_baseline_modes[channel] = config.fit_baseline_modes.get(channel) or "fit_constant"
+                self.fit_betas[channel] = config.fit_betas.get(channel)
+                self.fit_lambdas[channel] = config.fit_lambdas.get(channel)
                 self.vars[f"fit{channel}_status"].set(
                     f"{len(self.fit_regions[channel])} region(s) | {self.fit_models[channel]} | "
                     f"{self.fit_baseline_modes[channel]} (restored)"
@@ -1984,6 +2019,8 @@ class PretreatmentApp:
         self.fit_signatures = {wavelength: None for wavelength in WAVELENGTHS}
         self.fit_models = {wavelength: None for wavelength in WAVELENGTHS}
         self.fit_baseline_modes = {wavelength: "fit_constant" for wavelength in WAVELENGTHS}
+        self.fit_betas = {wavelength: None for wavelength in WAVELENGTHS}
+        self.fit_lambdas = {wavelength: None for wavelength in WAVELENGTHS}
         for wavelength in WAVELENGTHS:
             self.vars[f"fit{wavelength}_status"].set("Not set")
         if self.folder is not None:
@@ -2005,12 +2042,14 @@ class PretreatmentApp:
 
     def accept_fit_regions(
         self, channel: str, regions: list[tuple[float, float]], signature: tuple[Any, ...], model: str,
-        baseline_mode: str,
+        baseline_mode: str, beta: float | None = None, lam: float | None = None,
     ) -> None:
         self.fit_regions[channel] = regions
         self.fit_signatures[channel] = signature
         self.fit_models[channel] = model
         self.fit_baseline_modes[channel] = baseline_mode
+        self.fit_betas[channel] = beta
+        self.fit_lambdas[channel] = lam
         self.vars[f"fit{channel}_status"].set(f"{len(regions)} region(s) | {model} | {baseline_mode}")
         self.vars["status"].set(f"{channel} fitting regions and model saved.")
 

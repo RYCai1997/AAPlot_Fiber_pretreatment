@@ -295,9 +295,51 @@ w = estimate_reference_weight(corrected_470, corrected_410, mask, level_470, lev
 `mask` selects the samples to fit on and both levels are the per-channel `correction_scale`
 values.
 
-### Fitting
+### PLS fit
 
-- The fitting window supports linear, single-exponential, and double-exponential models
+Alongside the parametric models, `penalized` fits the bleaching baseline as a lower
+envelope without assuming a functional form, in the spirit of the iterative weighted least
+squares baseline used by RWD recorders. It suits recordings with rising signals, where a
+parametric curve is pulled upwards by the transients themselves.
+
+How it works:
+
+1. The trace is decimated to at most 1200 points (the down-sampling variant of the
+   algorithm) and taken to log space, where a steep exponential decay becomes close to
+   linear.
+2. A Whittaker smoother (second-difference penalty) is fitted with **iteratively
+   reweighted least squares**: every round down-weights the samples that sit above the
+   current fit, so upward transients drop out of the baseline while the decay is followed.
+3. The result is interpolated back onto the full time axis and used exactly like the other
+   models: `corrected = (raw − offset) × F(t₀) / F(t)`.
+
+| Control | Range | Default | Effect |
+| --- | --- | --- | --- |
+| `beta` | 1 – 8 | 8 | Sharpness of the asymmetric weighting. Higher clings closer to the lower envelope and ignores transients more aggressively |
+| `lambda` | 0.01 – 10 | 10 | Smoothing strength. Higher is smoother; the value is scaled with the number of fit points |
+
+Both are clamped to the listed range. They are stored per wavelength in `fit_betas` /
+`fit_lambdas`, written to `parameters_and_marker_edits.json`, and restored with the rest of
+the configuration. The 200 knots of the fitted curve are stored as well, so a saved PLS fit
+can be reused without refitting, like the parametric models.
+
+Notes:
+
+- The fit uses the **whole trace**, not just the fitting regions, because it is a global
+  smoother by nature. The regions only decide which samples score the fit (RMSE, BIC), so
+  keep them over a quiet stretch.
+- `beta` and `lambda` above the stable range are what break this family of algorithms: a
+  steep initial decay starts to look like an upward signal and the first minute is dragged
+  below the data. That is why the caps exist. With the defaults the baseline stays within
+  about 0.15 % of a known decay while a 3 s transient leaks only 4 % into the fit.
+- `penalized` is not part of the automatic BIC model comparison, because it is not a
+  parametric model and its effective degrees of freedom are not a single number. Select it
+  explicitly in the fitting window.
+
+### Fitting models
+
+- The fitting window supports linear, single-exponential, double-exponential and PLS
+  (`penalized`) models
   and one or more regions that can be dragged or resized; use **Add Region** and
   **Delete Selected Region** to edit the set. **Preview Fit** draws the candidate curve
   and reports its parameters, RMSE, and BIC; **Use These Regions** confirms the fit for
@@ -490,6 +532,12 @@ Original input files are read-only and are never modified.
 - The **Estimate** exclusion window is now set by its own two fields under the weight,
   defaulting to 5 s before and 60 s after each marker, instead of borrowing the Event
   Analysis window. Retuning the event window no longer moves the weight.
+- Added a **PLS fit** (`penalized`) bleaching model: decimated log-space Whittaker
+  smoothing with iteratively reweighted least squares, so rising signals are excluded from
+  the baseline. `beta` (1-8, default 8) and `lambda` (0.01-10, default 10) are set per
+  wavelength in the fitting window and capped at the range that stays stable on a steep
+  initial decay. The fitted curve is stored as 200 knots, so the reuse feature works for
+  this model too.
 - Changing an **offset** or a **fitting baseline** no longer blocks **Apply Correction**
   with "reconfirm this channel's fit". Those two fields are excluded from the confirmation
   signature and the channel is refitted on apply, so an offset edit shows up in the trace in
