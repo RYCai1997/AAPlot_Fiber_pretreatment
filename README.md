@@ -88,19 +88,6 @@ Properties of this form:
 | Does the transient amplitude depend on when it occurred? | No — the same relative response at 1 min and at 10 min |
 | Does the user baseline set the output scale? | No — it only seeds the free constant (`fit_constant`) or pins it (`fixed`) |
 
-The previous version multiplied by a user-entered baseline instead of `F(t₀)`:
-
-```
-corrected(t) = (raw(t) − offset) / F(t) × baseline        # retired
-```
-
-That form had two defects. First, the corrected level was pinned to whatever number the
-user typed, so a baseline larger than the actual data made the corrected trace read higher
-than the raw trace, and dF/F0 silently inherited that scale. Second, because the constant
-term was fitted to `raw − offset`, it absorbed the offset exactly, so the offset never
-reached F0 and a missing offset showed up only as a compressed dF/F0 — invisible in the
-plot. The current form removes both problems.
-
 Use the plotted **Fit** curve together with the reported `correction_constant` and
 `correction_scale` in `parameters_and_marker_edits.json` to verify what was subtracted and
 where the trace was anchored.
@@ -257,16 +244,16 @@ Original input files are read-only and are never modified.
 
 ### 2026-10-28
 
-- Optimised the bleaching correction algorithm. The corrected trace is now
-  `(raw − offset) × F(t₀) / F(t)` instead of `(raw − offset) / F(t) × baseline`, where
-  `F(t)` is the independently fitted bleaching curve. Dividing by the bleaching factor
-  normalised at t₀ un-bleaches the transient itself and keeps the fluorescence scale of
-  `raw − offset`, while the user baseline no longer controls the output level.
+- Optimised the bleaching correction algorithm. The corrected trace is
+  `(raw − offset) × F(t₀) / F(t)`, where `F(t)` is the independently fitted bleaching
+  curve. Dividing by the bleaching factor normalised at t₀ un-bleaches the transient
+  itself and keeps the fluorescence scale of `raw − offset`, so the user baseline no longer
+  controls the output level.
 - The offset is subtracted before the fit and therefore reaches F0 directly. Omitting it
   no longer hides inside the fitted constant: it inflates F0 and compresses every dF/F0 by
   `F_true / (F_true + residual offset)`.
-- The correction previously pinned the corrected level to the user baseline, which made a
-  large baseline push the corrected trace above the raw data. That dependency is gone.
+- The corrected level is no longer pinned to a user-entered value, so a large baseline can
+  no longer push the corrected trace above the raw data.
 - Division by a near-zero fitted value is now rejected with an explicit message instead of
   producing spikes, and `fixed`-mode baselines that disagree with the plateau of the data
   are reported in `fit_warnings`.
