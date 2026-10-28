@@ -759,7 +759,7 @@ def process_data(
         "fit_parameters": fit_parameters,
         **{f"fit_{wavelength}_parameters": fit_parameters[wavelength] for wavelength in wavelengths},
         "analysis_reference_from_user_baselines": float(analysis_reference),
-        "combine": config.combine,
+        "combine": config.combine if reference is not None else None,
         "reference_weight": None if weight_used is None else float(weight_used),
         "normalization": None,
         "source_channel": source,

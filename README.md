@@ -362,6 +362,16 @@ Notes:
   change the fit input, not the regions or the model, so **Apply Correction** refits that
   channel immediately. The corrected trace moves one-for-one with the offset, because the
   correction is anchored on `raw − offset`.
+- Editing an offset or a fitting baseline does **not** silently change anything on screen:
+  the trace, dF/F0 and every event result keep coming from the last applied settings. The
+  status line and the Event Analysis status then say which field is not applied yet, and
+  the status line after the next **Apply Correction** lists the offsets that were used
+  (`Offset used: 410=5000, 470=5000`). **Calculate Event dF/F0 & Z-score**, **Calculate
+  dF/F0 & Z-score** and **Estimate** apply pending edits themselves before they run, so a
+  changed offset always reaches these results.
+- With **Reference Wavelength** set to `None` the channel combination is not used and the
+  analysis trace is the corrected analysis channel, whatever **Combine Channels** says. A
+  recording that only contains one wavelength can therefore be analysed on its own.
 
 ## Display processing
 
@@ -538,6 +548,12 @@ Original input files are read-only and are never modified.
   wavelength in the fitting window and capped at the range that stays stable on a steep
   initial decay. The fitted curve is stored as 200 knots, so the reuse feature works for
   this model too.
+- An offset or baseline edit that has not been applied is now reported instead of leaving
+  stale results on screen, and **Calculate Event dF/F0 & Z-score**, **Calculate dF/F0 &
+  Z-score** and **Estimate** re-apply it automatically, so an offset change always reaches
+  the event traces. The status line after a successful apply lists the offsets used.
+- A recording with a single wavelength can now be applied: with no reference wavelength the
+  combination is skipped instead of blocking the run, and `combine` is reported as `null`.
 - Changing an **offset** or a **fitting baseline** no longer blocks **Apply Correction**
   with "reconfirm this channel's fit". Those two fields are excluded from the confirmation
   signature and the channel is refitted on apply, so an offset edit shows up in the trace in

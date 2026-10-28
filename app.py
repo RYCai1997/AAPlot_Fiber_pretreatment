@@ -597,6 +597,7 @@ class PretreatmentApp:
         self.last_saved_dir: str | None = None
         self.pending_saved_analysis: dict[str, Any] | None = None
         self.last_applied_config: ProcessingConfig | None = None
+        self.pending_continuation: Any = None
         self.fit_job: threading.Thread | None = None
         self.pending_config: ProcessingConfig | None = None
         self.fit_cancel: threading.Event | None = None
@@ -721,9 +722,13 @@ class PretreatmentApp:
             frame.grid(row=row, column=0, columnspan=2, sticky="ew", pady=2); row += 1
             frame.columnconfigure(1, weight=1)
             ttk.Label(frame, text=f"{wavelength} Offset").grid(row=0, column=0, sticky="w")
-            ttk.Entry(frame, textvariable=self.vars[f"offset{wavelength}"], width=12).grid(row=0, column=1, sticky="ew")
+            self.trace_input(
+                ttk.Entry(frame, textvariable=self.vars[f"offset{wavelength}"], width=12),
+            ).grid(row=0, column=1, sticky="ew")
             ttk.Label(frame, text=f"{wavelength} Fitting Baseline").grid(row=1, column=0, sticky="w")
-            ttk.Entry(frame, textvariable=self.vars[f"baseline{wavelength}"], width=12).grid(row=1, column=1, sticky="ew")
+            self.trace_input(
+                ttk.Entry(frame, textvariable=self.vars[f"baseline{wavelength}"], width=12),
+            ).grid(row=1, column=1, sticky="ew")
             ttk.Button(frame, text=f"Configure {wavelength} Fit...",
                        command=lambda value=wavelength: self.open_fit(value)).grid(row=2, column=0, sticky="ew", pady=2)
             ttk.Label(frame, textvariable=self.vars[f"fit{wavelength}_status"],
@@ -1066,12 +1071,66 @@ class PretreatmentApp:
         selector.bind("<<ComboboxSelected>>", lambda _event, k=key: self.convert_time_unit(k))
         return row + 1
 
+    # Inputs that change the corrected trace, so editing them needs another Apply.
+    TRACE_INPUT_KEYS = ("offset410", "offset470", "offset560",
+                        "baseline410", "baseline470", "baseline560")
+
+    def trace_input(self, widget: Any) -> Any:
+        """Wire a trace-shaping entry so an edit announces that it is not applied yet."""
+        widget.bind("<KeyRelease>", lambda _event: self.notice_pending_changes())
+        widget.bind("<FocusOut>", lambda _event: self.notice_pending_changes())
+        return widget
+
     def entry(self, parent: Any, row: int, label: str, key: str) -> int:
         self.ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=2)
-        self.ttk.Entry(parent, textvariable=self.vars[key], width=17).grid(
-            row=row, column=1, sticky="ew", pady=2
-        )
+        widget = self.ttk.Entry(parent, textvariable=self.vars[key], width=17)
+        widget.grid(row=row, column=1, sticky="ew", pady=2)
+        if key in self.TRACE_INPUT_KEYS:
+            self.trace_input(widget)
         return row + 1
+
+    def pending_config_changes(self) -> list[dict[str, Any]]:
+        """Settings edited since the last Apply Correction, i.e. the shown trace is stale."""
+        if self.last_applied_config is None or self.processed is None:
+            return []
+        try:
+            current = self.current_config()
+        except Exception:  # noqa: BLE001 - an unparseable edit is still a pending change
+            return [{"scope": "global", "parameter": "settings", "saved": "applied",
+                     "current": "invalid"}]
+        return compare_configs(self.last_applied_config, current)
+
+    def notice_pending_changes(self) -> None:
+        try:
+            changes = self.pending_config_changes()
+        except Exception:  # noqa: BLE001 - never break typing
+            return
+        if not changes:
+            return
+        names = ", ".join(sorted({row["parameter"] if row["scope"] == "global"
+                                  else f"{row['parameter']} ({row['scope']})"
+                                  for row in changes}))
+        message = (f"Not applied yet: {names}. The trace and every result still come from the "
+                   "previous settings; press Apply Correction.")
+        self.vars["status"].set(message)
+        self.vars["event_status"].set(
+            f"{message} Calculate Event dF/F0 & Z-score applies them first."
+        )
+
+    def refresh_with_current_settings(self, continuation: Any, action: str) -> bool:
+        """Re-apply pending edits, then run `continuation`. True when it will run later."""
+        changes = self.pending_config_changes()
+        if not changes:
+            return False
+        names = ", ".join(sorted({row["parameter"] if row["scope"] == "global"
+                                  else f"{row['parameter']} ({row['scope']})"
+                                  for row in changes}))
+        self.pending_continuation = continuation
+        self.vars["status"].set(
+            f"{names} changed since the last Apply Correction. Recomputing the trace before {action}..."
+        )
+        self.apply_processing()
+        return True
 
     @staticmethod
     def initial_window_size(window: Any, preferred_width: int, preferred_height: int,
@@ -1262,8 +1321,9 @@ class PretreatmentApp:
             raise ValueError("The valid range end must be greater than the start.")
         if config.combine not in COMBINE_MODES:
             raise ValueError(f"Unknown channel combination: {config.combine}")
-        if config.combine == "difference" and config.reference_wavelength is None:
-            raise ValueError("The difference combination needs a reference wavelength.")
+        # With no reference wavelength the combination is not used at all, so the analysis
+        # trace is the corrected analysis channel whatever mode is selected. Only complain
+        # about a weight that cannot be applied.
         if config.reference_weight is not None and not np.isfinite(config.reference_weight):
             raise ValueError("The reference weight must be a finite number.")
         if config.smooth_seconds < 0:
@@ -1529,6 +1589,9 @@ class PretreatmentApp:
         from tkinter import messagebox
         primary = self.analysis_wavelength_var.get()
         reference = self.reference_wavelength_var.get()
+        if self.refresh_with_current_settings(self.estimate_reference_weight_clicked,
+                                              "the weight estimate"):
+            return
         parameters = (self.details or {}).get("fit_parameters") or {}
         if self.processed is None or not {primary, reference} <= set(parameters):
             messagebox.showinfo(
@@ -2058,9 +2121,11 @@ class PretreatmentApp:
         if self.data is None:
             return
         if self.fit_job is not None and self.fit_job.is_alive():
+            self.pending_continuation = None
             messagebox.showinfo("Fitting In Progress", "Wait for the current fit to finish, or cancel it first.")
             return
         if self.fit_queue is not None and not self.fit_queue.empty():
+            self.pending_continuation = None
             messagebox.showinfo("Fitting Finishing", "The previous fit is finishing. Try again in a moment.")
             return
         try:
@@ -2074,6 +2139,7 @@ class PretreatmentApp:
                         "Reopen its fitting window and confirm the regions again."
                     )
         except Exception as exc:
+            self.pending_continuation = None
             messagebox.showerror("Processing Failed", str(exc)); self.vars["status"].set(f"Processing failed: {exc}")
             return
         self.start_fit_job(config)
@@ -2150,9 +2216,11 @@ class PretreatmentApp:
             self.processed, self.details = payload
             self.apply_processed_result()
         elif status == "cancelled":
+            self.pending_continuation = None
             self.vars["status"].set("Fitting cancelled. The previous correction is unchanged.")
         else:
             from tkinter import messagebox
+            self.pending_continuation = None
             messagebox.showerror("Processing Failed", str(payload))
             self.vars["status"].set(f"Processing failed: {payload}")
 
@@ -2203,10 +2271,23 @@ class PretreatmentApp:
         if reused:
             scope = (f" Reused the saved fit for {', '.join(sorted(reused))}"
                      + (f"; refitted {', '.join(sorted(refitted))}." if refitted else "."))
+        applied = self.last_applied_config
+        offset_note = ""
+        if applied is not None:
+            offset_note = " Offset used: " + ", ".join(
+                f"{channel}={applied.offsets.get(channel, 0.0):g}" for channel in applied.wavelengths
+            ) + "."
         self.vars["status"].set(
-            f"Correction complete: {len(self.processed):,} points.{scope} The current display remains "
-            "unsmoothed and not downsampled. Apply display processing from the Full trace analysis tab if needed."
+            f"Correction complete: {len(self.processed):,} points.{offset_note}{scope} The current display "
+            "remains unsmoothed and not downsampled. Apply display processing from the Full trace analysis tab "
+            "if needed."
         )
+        continuation, self.pending_continuation = self.pending_continuation, None
+        if continuation is not None:
+            try:
+                continuation()
+            except Exception as exc:  # noqa: BLE001 - reported instead of a silent traceback
+                messagebox.showerror("Analysis Failed", str(exc))
 
     def rebuild_axes(self) -> None:
         wavelengths = list(self.available_wavelengths) or [self.analysis_wavelength_var.get()]
@@ -3142,10 +3223,13 @@ class PretreatmentApp:
         return (marker_name, pre_seconds, post_seconds, baseline_seconds,
                 selected_ids, selected_signal_keys)
 
-    def calculate_event_analysis(self) -> None:
+    def calculate_event_analysis(self, allow_refresh: bool = True) -> None:
         from tkinter import messagebox
         if self.processed is None or self.details is None:
             messagebox.showinfo("Correction Required", "Complete fitting and apply correction first.")
+            return
+        if allow_refresh and self.refresh_with_current_settings(
+                lambda: self.calculate_event_analysis(allow_refresh=False), "the event analysis"):
             return
         try:
             (marker_name, pre_seconds, post_seconds, baseline_seconds,
@@ -3331,10 +3415,13 @@ class PretreatmentApp:
         self.update_scale_readouts()
         self.canvas.draw_idle()
 
-    def calculate_normalization(self) -> None:
+    def calculate_normalization(self, allow_refresh: bool = True) -> None:
         from tkinter import messagebox
         if self.processed is None or self.details is None:
             messagebox.showinfo("Correction Required", "Complete fitting and apply correction first.")
+            return
+        if allow_refresh and self.refresh_with_current_settings(
+                lambda: self.calculate_normalization(allow_refresh=False), "dF/F0"):
             return
         try:
             baseline_start, baseline_end, baseline_definition = self.resolve_baseline_interval()
