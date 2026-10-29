@@ -173,10 +173,46 @@ where the trace was anchored.
 
 ### Channel combination
 
-Two combinations are available; both produce the analysis trace that dF/F0 and Z-score are
-computed from. **Difference is the default**, because a reference that reacts to artifacts
-more strongly than its own level implies is over-subtracted by a ratio and can turn a
-positive deflection negative. **Ratio** stays available for comparisons with earlier work.
+Three combinations are available; all of them produce the analysis trace that dF/F0 and
+Z-score are computed from.
+
+| Mode | Combination | Weight | Mirrors |
+| --- | --- | --- | --- |
+| `rwd` (**default**) | `C_analysis − (slope·C_reference + intercept)` | fitted from the recording | RWD OFRS motion correction |
+| `difference` | `C_analysis − w·(C_reference − F_reference(t₀))` | Reference Weight field | — |
+| `ratio` | `C_analysis / C_reference` | none | classic isosbestic ratio |
+
+**RWD motion fit** (`combine = rwd`) is the default and reproduces what the RWD OFRS software
+does to 470 against 410 (manual, `Pre-processing algorithm description`, motion correction):
+
+```
+slope, intercept = robust linear fit of C_analysis on C_reference   ("robust linear fit")
+motion(t)        = C_analysis(t) − (slope · C_reference(t) + intercept)
+analysis(t)      = motion(t) + median(F_raw_analysis)
+dF/F0(t)         = 100 · (analysis(t) − analysis₀) / analysis₀ ,   analysis₀ = median(F_raw_analysis)
+```
+
+`median(F_raw_analysis)` is RWD's `median(Ffull)`, which its manual defines as *the median
+value of the full-time raw fluorescence data of interest* — the analysis channel after
+offset subtraction, before any bleaching correction. Keeping the motion-corrected trace on
+that level is what makes dF/F0 divide by the same denominator RWD uses.
+
+The fit is a soft-L1 (`soft_l1`) least-squares line, which is RWD's `robust linear fit`; no
+weight has to be supplied, because the slope and the intercept both come from the data.
+Compared on a synthetic recording (300-count event, motion artifact 2.3 × stronger on 410)
+against a literal re-implementation of the manual's formula the two traces agree to 0.018 %
+dF/F0 over the whole recording, i.e. 0.12 % of the event peak, with the same artifact
+residual and the same noise standard deviation.
+
+The residual differences from the other modes are the point of the exercise: with the RWD
+mode the artifact is removed by the fitted slope. With `difference` and a blank weight the
+matched scale is used instead, which in the same test left a −4.6 % artifact while the RWD
+mode left −0.4 %.
+
+**Difference** stays available for explicit control over the weight, because a reference
+that reacts to artifacts more strongly than its own level implies is over-subtracted by a
+ratio and can turn a positive deflection negative. **Ratio** remains for comparisons with
+earlier work.
 
 **Difference** (`combine = difference`, default)
 
@@ -329,15 +365,26 @@ How it works:
 3. The result is interpolated back onto the full time axis and used exactly like the other
    models: `corrected = (raw − offset) × F(t₀) / F(t)`.
 
+Like RWD there is **one user-facing knob**:
+
 | Control | Range | Default | Effect |
 | --- | --- | --- | --- |
-| `beta` | 1 – 8 | 8 | Sharpness of the asymmetric weighting. Higher clings closer to the lower envelope and ignores transients more aggressively |
-| `lambda` | 0.01 – 10 | 10 | Smoothing strength. Higher is smoother; the value is scaled with the number of fit points |
+| `beta` | 5 – 12 | 8 | Sharpness of the asymmetric weighting. Higher clings closer to the lower envelope and ignores transients more aggressively; lower keeps the fitted curve closer to the data trend |
 
-Both are clamped to the listed range. They are stored per wavelength in `fit_betas` /
-`fit_lambdas`, written to `parameters_and_marker_edits.json`, and restored with the rest of
-the configuration. The 200 knots of the fitted curve are stored as well, so a saved PLS fit
-can be reused without refitting, like the parametric models.
+The range and the default are the ones RWD documents for its correction coefficient
+(`The correction coefficient β ranges from 5~12, with a default value of 8`), and the
+effect of moving it matches that description. The smoothing strength is internal: `lambda`
+stays at 10 and scales with the number of fit points, so it is not exposed in the window and
+always falls back to its default when a fit is run. `beta` is stored per wavelength in
+`fit_betas`, written to `parameters_and_marker_edits.json`, and restored with the rest of the
+configuration. The 200 knots of the fitted curve are stored as well, so a saved PLS fit can
+be reused without refitting, like the parametric models.
+
+RWD splits this algorithm into `PLS Fit` and `PLS Fit (Down Sampling)`, the second one for
+long recordings. Here a single `penalized` model covers both: recordings shorter than 1200
+device samples are fitted on every point, and longer ones are decimated before the fit and
+interpolated back — the down-sampling variant, chosen automatically. The preview reports
+which of the two was used (`fit points = 1,200 (downsampled)`).
 
 Notes:
 
@@ -348,9 +395,9 @@ Notes:
   steep initial decay starts to look like an upward signal and the first minute is dragged
   below the data. That is why the caps exist. With the defaults the baseline stays within
   about 0.15 % of a known decay while a 3 s transient leaks only 4 % into the fit.
-- The fitting window preview reports `beta`, `lambda`, the iteration count, the number of
-  fit points (and whether they were down-sampled) and how many knots were stored, next to
-  the usual RMSE, BIC and convergence line.
+- The fitting window preview reports `beta`, the iteration count, the number of fit points
+  (and whether they were down-sampled) and how many knots were stored, next to the usual
+  RMSE, BIC and convergence line.
 - `penalized` is not part of the automatic BIC model comparison, because it is not a
   parametric model and its effective degrees of freedom are not a single number. Select it
   explicitly in the fitting window.
@@ -524,6 +571,23 @@ Original input files are read-only and are never modified.
   creates or reuses the `aaplot` conda environment, validates `requirements.txt` with the new
   `env_check.py`, installs missing packages with `pip`, and starts `app.py` with that
   environment's interpreter; `--no-install` only checks and `--recreate` rebuilds the env.
+
+### 2026-10-29
+
+- Reproduced RWD's 470/410 motion correction as a third channel combination, `rwd`, and
+  made it the default. The corrected analysis channel is regressed on the corrected
+  reference with a robust (`soft_l1`) straight line, the fitted prediction is subtracted,
+  and the result is put back on `median(Ffull)` — the median of the full-time raw analysis
+  trace, which is the denominator the RWD manual specifies. Measured against a literal
+  implementation of the manual's formula on a synthetic recording, the two traces agree to
+  0.018 % dF/F0 across the whole trace (0.12 % of the event peak); the artifact residual and
+  the noise standard deviation match as well. `difference` and `ratio` are still selectable,
+  now with the weight field used only by `difference`.
+- Reduced the PLS fit to the single knob RWD exposes: `beta`, range 5–12, default 8. The
+  smoothing strength `lambda` is internal and no longer shown or edited; it falls back to its
+  default whenever a fit runs. The fit window hint states the RWD default.
+- The combined-presentation axis label and the event-analysis signal list now name the RWD
+  fit and its slope instead of calling everything a ratio.
 
 ### 2026-10-28
 

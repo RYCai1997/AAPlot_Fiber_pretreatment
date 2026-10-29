@@ -62,6 +62,9 @@ def aligned_arrays(*arrays: Any) -> list[np.ndarray]:
 
 
 from processing import (
+    PLS_DEFAULT_BETA,
+    PLS_MAX_BETA,
+    PLS_MIN_BETA,
     ProcessingCancelled,
     ProcessingConfig,
     available_recording_channels,
@@ -80,6 +83,8 @@ from processing import (
     load_recording,
     process_data,
     region_mask,
+    rwd_motion_corrected,
+    rwd_motion_label,
     select_effective_data,
 )
 
@@ -88,7 +93,7 @@ DEFAULT_STRINGS = {
     "folder": "", "range_start": "0", "range_end": "0",
     "offset410": "0", "offset470": "0", "offset560": "0",
     "baseline410": "", "baseline470": "", "baseline560": "",
-    "combine": "difference", "reference_weight": "", "fit_model": "double_exponential", "smooth": "10",
+    "combine": "rwd", "reference_weight": "", "fit_model": "double_exponential", "smooth": "10",
     "fit410_status": "Not set", "fit470_status": "Not set", "fit560_status": "Not set",
     "norm_start": "0", "norm_end": "1",
     "norm_pre_duration": "5", "zero_time": "0", "downsample_value": "1",
@@ -116,7 +121,7 @@ LINE_WIDTH_LABELS = {
 }
 
 WAVELENGTHS = ("410", "470", "560")
-COMBINE_MODES = ("difference", "ratio")
+COMBINE_MODES = ("rwd", "difference", "ratio")
 TIME_UNITS = ("s", "min")
 # Fields the user edits as a duration or a timestamp, with their startup unit.
 TIME_FIELD_UNITS = {
@@ -203,16 +208,16 @@ class FitWindow:
         )
         self.model_box.pack(fill=tk.X, pady=(0, 7))
         self.model_box.bind("<<ComboboxSelected>>", self.invalidate_preview)
-        ttk.Label(left, text="PLS beta (1-8) / lambda (0.01-10)").pack(anchor="w", pady=(4, 0))
+        ttk.Label(left, text="PLS beta (5-12)").pack(anchor="w", pady=(4, 0))
         pls_row = ttk.Frame(left)
         pls_row.pack(fill=tk.X, pady=(0, 7))
         self.beta_var = tk.StringVar(value=f"{float(config.fit_betas.get(channel) or 8.0):g}")
-        self.lambda_var = tk.StringVar(value=f"{float(config.fit_lambdas.get(channel) or 10.0):g}")
-        for variable, width in ((self.beta_var, 5), (self.lambda_var, 5)):
-            entry = ttk.Entry(pls_row, textvariable=variable, width=width)
-            entry.pack(side=tk.LEFT, padx=(0, 4))
-            entry.bind("<KeyRelease>", self.invalidate_preview)
+        beta_entry = ttk.Entry(pls_row, textvariable=self.beta_var, width=6)
+        beta_entry.pack(side=tk.LEFT, padx=(0, 4))
+        beta_entry.bind("<KeyRelease>", self.invalidate_preview)
         ttk.Label(pls_row, text="used by the PLS fit only").pack(side=tk.LEFT)
+        ttk.Label(left, text="RWD default 8; smaller keeps the fit closer to the data trend.",
+                  style="Hint.TLabel", wraplength=250).pack(anchor="w", pady=(0, 5))
         ttk.Label(left, text="The baseline initializes the freely fitted constant (fit_constant).",
                   wraplength=250).pack(anchor="w", pady=(0, 5))
         self.add_button = ttk.Button(left, text="Add Region", command=self.add_region)
@@ -382,7 +387,7 @@ class FitWindow:
             text = f"A={parameters['amplitude']:.6g}, tau={parameters['tau_s']:.6g}s"
         elif model == "penalized":
             text = (f"beta={parameters.get('beta', float('nan')):.4g}, "
-                    f"lambda={parameters.get('lambda', float('nan')):.4g}, "
+                    f"lambda={parameters.get('lambda', float('nan')):.4g} (internal), "
                     f"iterations={int(parameters.get('iterations', 0))}\n"
                     f"fit points={int(parameters.get('fit_points', 0)):,}"
                     f"{' (downsampled)' if parameters.get('downsampled') else ''}, "
@@ -473,18 +478,16 @@ class FitWindow:
             pass
 
     def selected_beta(self) -> float:
+        """RWD's single correction coefficient, documented as 5-12 with a default of 8."""
         try:
             value = float(self.beta_var.get())
         except ValueError:
-            value = 8.0
-        return float(np.clip(value, 1.0, 8.0))
+            value = PLS_DEFAULT_BETA
+        return float(np.clip(value, PLS_MIN_BETA, PLS_MAX_BETA))
 
-    def selected_lambda(self) -> float:
-        try:
-            value = float(self.lambda_var.get())
-        except ValueError:
-            value = 10.0
-        return float(np.clip(value, 0.01, 10.0))
+    def selected_lambda(self) -> float | None:
+        """Smoothing is internal, like RWD; the fit falls back to its own default."""
+        return None
 
     def fit_snapshot(self) -> tuple[Any, ...]:
         return (self.signature(), tuple((float(start), float(end)) for start, end in self.regions))
@@ -829,6 +832,11 @@ class PretreatmentApp:
                                         values=COMBINE_MODES, state="readonly", width=19)
         self.combine_box.grid(row=row, column=1, sticky="ew"); row += 1
         self.combine_box.bind("<<ComboboxSelected>>", lambda _event: self.combine_changed())
+        ttk.Label(data_tab, text="rwd = the RWD motion fit (robust fit of the analysis channel "
+                                 "on the reference, subtracted). difference / ratio use the "
+                                 "Reference Weight below.",
+                  style="Hint.TLabel", wraplength=350, justify="left").grid(
+            row=row, column=0, columnspan=2, sticky="w", pady=(0, 4)); row += 1
         ttk.Label(data_tab, text="Reference Weight").grid(row=row, column=0, sticky="w")
         weight_row = ttk.Frame(data_tab)
         weight_row.grid(row=row, column=1, sticky="ew"); row += 1
@@ -840,9 +848,10 @@ class PretreatmentApp:
                                                  command=self.estimate_reference_weight_clicked,
                                                  state="disabled")
         self.estimate_weight_button.grid(row=0, column=1, sticky="e", padx=(4, 0))
-        ttk.Label(data_tab, text="Blank = matched scale (analysis level / reference level). "
-                                 "Estimate needs an applied correction and uses the exclusion "
-                                 "windows below.",
+        ttk.Label(data_tab, text="Used by the difference combination only. Blank = matched scale "
+                                 "(analysis level / reference level); Estimate fits it on the data "
+                                 "outside the exclusion windows below. The RWD combination always "
+                                 "fits its own slope and intercept and ignores this field.",
                   wraplength=350, justify="left").grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 6)); row += 1
         row = self.add_time_entry(data_tab, row, "Exclude Before Marker", "estimate_exclude_before")
         row = self.add_time_entry(data_tab, row, "Exclude After Marker", "estimate_exclude_after")
@@ -1378,7 +1387,8 @@ class PretreatmentApp:
             analysis_wavelength=analysis,
             reference_wavelength=reference,
             combine=self.vars["combine"].get(),
-            reference_weight=self.optional_number("reference_weight"),
+            reference_weight=(None if self.vars["combine"].get() == "rwd"
+                              else self.optional_number("reference_weight")),
             fit_model=self.vars["fit_model"].get(),
             smooth_seconds=smooth_seconds,
             fit_regions={value: list(self.fit_regions[value]) for value in wavelengths},
@@ -1643,8 +1653,9 @@ class PretreatmentApp:
             messagebox.showerror("Load Failed", str(exc))
 
     def sync_reference_weight_state(self) -> None:
-        """The weight is only meaningful for the difference combination."""
-        difference = self.vars["combine"].get() == "difference"
+        """The weight only applies to the difference combination; RWD fits it itself."""
+        mode = self.vars["combine"].get()
+        difference = mode == "difference"
         has_reference = self.reference_wavelength_var.get() not in {"", "None"}
         if hasattr(self, "reference_weight_entry"):
             self.reference_weight_entry.configure(
@@ -2084,13 +2095,34 @@ class PretreatmentApp:
         else:
             primary_level = self.number(f"baseline{primary}")
             reference_level = self.number(f"baseline{reference}")
+        motion_fit = None
         try:
-            combined, combined_label, analysis_reference, _weight = combine_channels(
-                self.processed[f"corrected_{primary}"].to_numpy(float),
-                self.processed[f"corrected_{reference}"].to_numpy(float),
-                mode, self.optional_number("reference_weight"),
-                primary_level, reference_level, primary, reference,
-            )
+            if mode == "rwd":
+                raw_column = f"offset_adjusted_{primary}"
+                raw_level = (float(np.nanmedian(self.processed[raw_column].to_numpy(float)))
+                             if raw_column in self.processed else None)
+                combined, analysis_reference, slope, intercept, used = rwd_motion_corrected(
+                    self.processed[f"corrected_{primary}"].to_numpy(float),
+                    self.processed[f"corrected_{reference}"].to_numpy(float),
+                    raw_level,
+                )
+                combined_label = rwd_motion_label(primary, slope, intercept)
+                _weight = slope
+                motion_fit = {
+                    "slope": slope,
+                    "intercept": intercept,
+                    "samples": used,
+                    "median_signal": float(analysis_reference),
+                    "denominator": ("median of the full-time raw analysis trace after "
+                                    "offset subtraction"),
+                }
+            else:
+                combined, combined_label, analysis_reference, _weight = combine_channels(
+                    self.processed[f"corrected_{primary}"].to_numpy(float),
+                    self.processed[f"corrected_{reference}"].to_numpy(float),
+                    mode, self.optional_number("reference_weight"),
+                    primary_level, reference_level, primary, reference,
+                )
         except ValueError as exc:
             messagebox.showerror("Cannot Combine Channels", str(exc))
             return
@@ -2107,6 +2139,7 @@ class PretreatmentApp:
             self.details["combine"] = mode
             self.details["reference_weight"] = (None if mode == "ratio" else _weight)
             self.details["analysis_reference_from_user_baselines"] = float(analysis_reference)
+            self.details["rwd_motion_fit"] = motion_fit
             self.details["normalization"] = None
         self.refresh_event_signal_list()
         self.rebuild_axes()
@@ -2185,8 +2218,8 @@ class PretreatmentApp:
         self.fit_betas[channel] = beta
         self.fit_lambdas[channel] = lam
         summary = f"{len(regions)} region(s) | {model} | {baseline_mode}"
-        if model == "penalized" and beta is not None and lam is not None:
-            summary += f" | beta={float(beta):g}, lambda={float(lam):g}"
+        if model == "penalized" and beta is not None:
+            summary += f" | beta={float(beta):g}"
         self.vars[f"fit{channel}_status"].set(summary)
         self.vars["status"].set(f"{channel} fitting regions and model saved.")
 
@@ -2785,7 +2818,12 @@ class PretreatmentApp:
             elif key == "ratio":
                 self.plot_display(ax, x, self.display_values("combined_signal")[indices], color="#7B4B94",
                         lw=self.line_width("combined"), gid="combined")
-                ax.set_ylabel(self.details.get("combined_label") or "Corrected ratio")
+                fit = (self.details or {}).get("rwd_motion_fit")
+                if fit is not None:
+                    ax.set_ylabel(f"RWD motion-corrected {self.analysis_wavelength_var.get()} "
+                                  f"(slope={float(fit['slope']):.4g})")
+                else:
+                    ax.set_ylabel(self.details.get("combined_label") or "Corrected ratio")
             elif key == "dff":
                 self.plot_display(ax, x, self.display_values("dff_percent")[indices], color="#7B4B94",
                         lw=self.line_width("dff"), gid="dff")
@@ -3051,6 +3089,11 @@ class PretreatmentApp:
                 label = f"Difference {analysis}/{reference}"
                 if weight is not None:
                     label += f" (w={float(weight):.4g})"
+            elif mode == "rwd":
+                label = f"RWD {analysis}/{reference}"
+                slope = ((self.details or {}).get("rwd_motion_fit") or {}).get("slope")
+                if slope is not None:
+                    label += f" (slope={float(slope):.4g})"
             else:
                 label = f"Ratio {analysis}/{reference}"
             choices.append({

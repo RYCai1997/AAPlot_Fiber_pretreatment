@@ -65,8 +65,11 @@ FIT_EXACT = os.environ.get("AAPLOT_FIT_EXACT", "").strip().lower() in {"1", "tru
 
 # Penalised least squares ("PLS fit"). The weight sharpness and the smoothing
 # strength are capped at the values that stay stable on a steep initial decay.
+# RWD exposes a single correction coefficient beta, documented as 5-12 with a default
+# of 8; the smoothing strength is internal and not user-selectable.
+PLS_MIN_BETA = 5.0
 PLS_DEFAULT_BETA = 8.0
-PLS_MAX_BETA = 8.0
+PLS_MAX_BETA = 12.0
 PLS_DEFAULT_LAMBDA = 10.0
 PLS_MAX_LAMBDA = 10.0
 PLS_MAX_POINTS = 1200
@@ -519,6 +522,64 @@ def select_best_bleaching_model(
     return best_model, best_fitted, best_parameters, comparison
 
 
+def robust_motion_fit(
+    signal: np.ndarray,
+    control: np.ndarray,
+    mask: np.ndarray | None = None,
+) -> tuple[float, float, int]:
+    """Robust linear fit of the signal channel on the control channel.
+
+    This reproduces RWD's motion fit: a straight line ``signal ~ slope*control +
+    intercept`` estimated with a robust loss, so the prediction can be subtracted
+    from the signal. Returns ``(slope, intercept, samples_used)``.
+    """
+    signal = np.asarray(signal, float)
+    control = np.asarray(control, float)
+    keep = np.isfinite(signal) & np.isfinite(control)
+    if mask is not None:
+        keep &= np.asarray(mask, bool)
+    used = int(keep.sum())
+    if used < 50:
+        raise ValueError("Fewer than 50 samples are available for the motion fit.")
+    x, y = control[keep], signal[keep]
+    if not np.isfinite(x).all() or float(np.ptp(x)) <= 0:
+        raise ValueError("The control channel does not vary, so the motion fit cannot be estimated.")
+    design = np.column_stack((x, np.ones_like(x)))
+    start = np.linalg.lstsq(design, y, rcond=None)[0]
+    scale = float(np.median(np.abs(np.diff(y)))) or float(np.std(y)) or 1.0
+    result = least_squares(lambda parameters: design @ parameters - y, start,
+                           loss="soft_l1", f_scale=scale)
+    return float(result.x[0]), float(result.x[1]), used
+
+
+def rwd_motion_label(primary_label: str, slope: float, intercept: float) -> str:
+    return (f"RWD motion-corrected {primary_label} "
+            f"(slope={slope:.6g}, intercept={intercept:.6g})")
+
+
+def rwd_motion_corrected(
+    primary: np.ndarray,
+    reference: np.ndarray,
+    raw_level: float | None = None,
+) -> tuple[np.ndarray, float, float, float, int]:
+    """RWD's motion correction: robust linear fit, subtract, rescale.
+
+    ``motion = primary - (slope * reference + intercept)`` removes the part of the
+    signal that follows the control channel, and the result is placed back on the
+    level of the raw trace so that dF/F0 divides by the median of the full-time raw
+    fluorescence, exactly as the RWD manual defines it. Returns
+    ``(trace, level, slope, intercept, samples)``.
+    """
+    primary = np.asarray(primary, float)
+    reference = np.asarray(reference, float)
+    slope, intercept, used = robust_motion_fit(primary, reference)
+    motion = primary - (slope * reference + intercept)
+    level = float(np.nanmedian(primary)) if raw_level is None else float(raw_level)
+    if not np.isfinite(level) or np.isclose(level, 0.0):
+        raise ValueError("The median of the raw analysis channel is zero, so dF/F0 cannot be scaled.")
+    return motion + level, level, slope, intercept, used
+
+
 def combine_channels(
     primary: np.ndarray,
     reference: np.ndarray,
@@ -528,6 +589,7 @@ def combine_channels(
     reference_level: float,
     primary_label: str = "470",
     reference_label: str = "410",
+    raw_level: float | None = None,
 ) -> tuple[np.ndarray, str, float, float]:
     """Combine two corrected channels as a ratio or a weighted difference.
 
@@ -542,10 +604,13 @@ def combine_channels(
     default weight is the matched scale ``primary_level / reference_level``, which
     is the first-order equivalent of the ratio without dividing by the reference.
     """
-    if mode not in {"ratio", "difference"}:
+    if mode not in {"ratio", "difference", "rwd"}:
         raise ValueError(f"Unknown channel combination: {mode}")
     primary = np.asarray(primary, float)
     reference = np.asarray(reference, float)
+    if mode == "rwd":
+        trace, level, slope, intercept, _used = rwd_motion_corrected(primary, reference, raw_level)
+        return trace, rwd_motion_label(primary_label, slope, intercept), level, slope
     if mode == "ratio":
         if np.any(np.isfinite(reference) & np.isclose(reference, 0)):
             raise ValueError(
@@ -656,6 +721,7 @@ def process_data(
     output_columns: dict[str, np.ndarray] = {}
     fit_parameters: dict[str, dict[str, Any]] = {}
     corrected: dict[str, np.ndarray] = {}
+    adjusted_traces: dict[str, np.ndarray] = {}
     masks: dict[str, np.ndarray] = {}
     for wavelength in wavelengths:
         if cancel is not None and cancel.is_set():
@@ -727,6 +793,7 @@ def process_data(
         output_columns[f"corrected_{wavelength}"] = channel_corrected
         output_columns[f"fit_used_{wavelength}"] = mask.astype(int)
         corrected[wavelength] = channel_corrected
+        adjusted_traces[wavelength] = adjusted
         masks[wavelength] = mask
         fit_parameters[wavelength] = parameters
 
@@ -734,7 +801,26 @@ def process_data(
     reference = config.reference_wavelength
     combined = np.full(len(subset), np.nan)
     combined_label: str | None = None
-    if reference is not None:
+    motion_fit: dict[str, Any] | None = None
+    if reference is not None and config.combine == "rwd":
+        # RWD motion correction: robust linear fit of the signal on the control, the
+        # fitted prediction is subtracted, and the result is placed back on the level of
+        # the raw trace so dF/F0 divides by the median of the full-time raw fluorescence.
+        raw_level = float(np.nanmedian(adjusted_traces[primary]))
+        analysis_trace, level, slope, intercept, used = rwd_motion_corrected(
+            corrected[primary], corrected[reference], raw_level)
+        combined = analysis_trace.copy()
+        combined_label = rwd_motion_label(primary, slope, intercept)
+        analysis_reference = level
+        weight_used = slope
+        motion_fit = {
+            "slope": slope,
+            "intercept": intercept,
+            "samples": used,
+            "median_signal": level,
+            "denominator": "median of the full-time raw analysis trace after offset subtraction",
+        }
+    elif reference is not None:
         combined, combined_label, analysis_reference, weight_used = combine_channels(
             corrected[primary], corrected[reference], config.combine, config.reference_weight,
             fit_parameters[primary]["correction_scale"], fit_parameters[reference]["correction_scale"],
@@ -774,6 +860,7 @@ def process_data(
         "analysis_reference_from_user_baselines": float(analysis_reference),
         "combine": config.combine if reference is not None else None,
         "reference_weight": None if weight_used is None else float(weight_used),
+        "rwd_motion_fit": motion_fit,
         "normalization": None,
         "source_channel": source,
         "definitions": {
@@ -782,8 +869,12 @@ def process_data(
             "combined_channel": {
                 "ratio": "corrected analysis / corrected reference",
                 "difference": "corrected analysis - weight x (corrected reference - its level); only the reference deviation is removed",
+                "rwd": ("RWD motion correction: corrected analysis - (slope x corrected reference + intercept), "
+                        "then scaled by the median of the full offset-subtracted analysis trace"),
             }[config.combine],
-            "reference_weight": "None means the matched scale (analysis level / reference level)",
+            "reference_weight": ("fitted robustly from the recording and not user-editable"
+                                 if config.combine == "rwd"
+                                 else "None means the matched scale (analysis level / reference level)"),
             "fit_regions": "only samples inside the user-selected intervals are used for parameter estimation",
         },
     }
@@ -1127,8 +1218,8 @@ def fit_penalized_baseline(
     x, y = x[keep], y[keep]
     if x.size < 50:
         raise ValueError("Fewer than 50 valid samples are available for the PLS fit.")
-    beta = float(np.clip(beta, 1.0, PLS_MAX_BETA))
-    lam = float(np.clip(lam, 1e-2, PLS_MAX_LAMBDA))
+    beta = float(np.clip(PLS_DEFAULT_BETA if beta is None else beta, PLS_MIN_BETA, PLS_MAX_BETA))
+    lam = float(np.clip(PLS_DEFAULT_LAMBDA if lam is None else lam, 1e-2, PLS_MAX_LAMBDA))
 
     index = sample_indices(x.size, max_points)
     grid_x, grid_y = x[index], y[index]
