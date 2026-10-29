@@ -1303,29 +1303,11 @@ class PretreatmentApp:
             raise ValueError(f"{key} must be a finite number.")
         return value
 
-    def fit_f0(self, channel: str) -> float:
-        """F0 of one channel: its fitting baseline minus the offset. Raises when unusable."""
-        baseline = self.optional_number(f"baseline{channel}")
-        offset = self.optional_number(f"offset{channel}")
-        return effective_baseline(baseline, offset, channel)
-
-    def combined_f0(self) -> float:
-        """F0 of the analysis trace: the analysis F0, or the ratio of both F0s."""
-        analysis = self.fit_f0(self.analysis_wavelength_var.get())
-        if self.vars["combine"].get() != "ratio":
-            return analysis
-        reference = self.reference_wavelength_var.get()
-        if reference in {"", "None"}:
-            return analysis
-        reference_f0 = self.fit_f0(reference)
-        return analysis / reference_f0
-
-    def f0_overrides(self) -> dict[str, float]:
-        """F0 values the typed baselines impose, keyed the way the normalizer expects."""
-        overrides: dict[str, float] = {"analysis": self.combined_f0()}
-        for channel in self.available_wavelengths:
-            overrides[channel] = self.fit_f0(channel)
-        return overrides
+    def normalized_f0(self) -> float | None:
+        """F0 the last normalization actually used, straight from its details."""
+        details = (self.details or {}).get("normalization") or {}
+        value = details.get("f0_mean")
+        return float(value) if value is not None else None
 
     def optional_number(self, key: str) -> float | None:
         if not self.vars[key].get().strip():
@@ -2988,29 +2970,25 @@ class PretreatmentApp:
 
     def dff_axis_label(self, prefix: str) -> str:
         """Axis label that carries the F0 the curve was divided by."""
-        try:
-            f0 = self.combined_f0()
-        except ValueError:
-            return f"{prefix} (%)"
-        return f"{prefix} (%) | F0 = {f0:.6g}"
+        f0 = self.normalized_f0()
+        return f"{prefix} (%)" if f0 is None else f"{prefix} (%) | F0 = {f0:.6g}"
 
     def f0_summary(self) -> str:
-        """Show the F0 each visible channel is being divided by, so an edit is traceable."""
+        """Level of every corrected trace, which is what F0 will be measured from."""
+        if self.processed is None:
+            return ""
         parts = []
         for channel in self.available_wavelengths:
-            try:
-                parts.append(f"{channel}={self.fit_f0(channel):g}")
-            except ValueError:
+            column = f"corrected_{channel}"
+            if column not in self.processed:
                 continue
+            values = self.processed[column].to_numpy(float)
+            finite = values[np.isfinite(values)]
+            if finite.size:
+                parts.append(f"{channel}={float(np.mean(finite)):.5g}")
         if not parts:
             return ""
-        combined = ""
-        try:
-            combined = f"; {self.analysis_wavelength_var.get()}/{self.reference_wavelength_var.get()} " \
-                       f"F0={self.combined_f0():.6g}"
-        except ValueError:
-            combined = ""
-        return f" F0: {', '.join(parts)}{combined}."
+        return f" Corrected level: {', '.join(parts)}."
 
     def gap_fill_note(self) -> str:
         """One short sentence about the empty cells that were bridged while loading."""
@@ -3521,13 +3499,6 @@ class PretreatmentApp:
         return (marker_name, pre_seconds, post_seconds, baseline_seconds,
                 selected_ids, selected_signal_keys)
 
-    def event_signal_f0(self, signal: dict[str, str]) -> float:
-        """F0 of one event signal: its channel's F0, or both F0s divided for a ratio."""
-        if signal.get("kind") == "wavelength":
-            channel = str(signal.get("key", "")).split(":", 1)[-1]
-            return self.fit_f0(channel)
-        return self.combined_f0()
-
     def calculate_event_analysis(self, allow_refresh: bool = True) -> None:
         from tkinter import messagebox
         if self.processed is None or self.details is None:
@@ -3550,7 +3521,6 @@ class PretreatmentApp:
             for signal in selected_signals:
                 event_source = self.processed[["original_time_s"]].copy()
                 event_source["event_signal"] = self.event_signal_values(signal)
-                signal_f0 = self.event_signal_f0(signal)
                 trials, average, details = calculate_event_locked_traces(
                     event_source,
                     marker_times,
@@ -3559,7 +3529,6 @@ class PretreatmentApp:
                     post_seconds,
                     baseline_seconds,
                     signal_column="event_signal",
-                    f0_override=signal_f0,
                 )
                 trials.insert(0, "event_signal_label", signal["label"])
                 trials.insert(0, "event_signal_key", signal["key"])
@@ -3577,9 +3546,7 @@ class PretreatmentApp:
                 signal_details[signal["key"]] = {
                     "label": signal["label"],
                     "kind": signal["kind"],
-                    "f0_override": signal_f0,
-                    "f0_source": ("fitting baseline minus offset" if signal_f0 is not None
-                                  else "mean of each trial's pre-marker baseline"),
+                    "f0_source": "mean of each trial's pre-marker baseline",
                     **{key: value for key, value in signal.items()
                        if key not in {"key", "label", "kind"}},
                     **details,
@@ -3750,7 +3717,6 @@ class PretreatmentApp:
                 self.smoothing_seconds(),
                 float(self.details["sample_rate_hz"]),
                 zero_time,
-                f0_overrides=self.f0_overrides(),
             )
             normalization_details["baseline_definition"] = baseline_definition
             normalization_details["zero_definition"] = zero_definition

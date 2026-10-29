@@ -48,10 +48,10 @@ tab. Edits are kept in memory and written to `markers_working_copy.csv` on expor
    the **Valid Data Range**, then enter each visible **Offset** and **Fitting Baseline**. The
    baseline is the **lowest point of the trace after bleaching** — the plateau the signal
    decays to — read off the **raw** plot, so it still contains the offset: the program subtracts
-   the offset from it and uses the result as F0, the level the corrected trace sits on and the
-   denominator of dF/F0. A baseline
-   that is not larger than the offset is rejected with an error naming the channel, because
-   nothing would be left of it once the offset is removed.
+   the offset from it and puts the corrected trace on that level. dF/F0 is then normalised by the
+   mean of the corrected trace inside the baseline window, so the two fields act through the
+   level they set. A baseline that is not larger than the offset is rejected with an error naming
+   the channel, because nothing would be left of it once the offset is removed.
 2. Open **Configure <wavelength> Fit...** for every wavelength, select one or more regions and a
    model, preview, and confirm.
 3. Choose the **Analysis Wavelength** and, optionally, a **Reference Wavelength** with a
@@ -67,7 +67,7 @@ trials, and **Export Results** to write the folder.
 | Setting | Default | Where |
 | --- | --- | --- |
 | Channel combination | `rwd` (RWD motion fit) | Data & Fitting |
-| F0 for dF/F0 | Fitting Baseline − Offset (per wavelength) | Data & Fitting |
+| F0 for dF/F0 | mean of the corrected trace in the baseline window | Full trace analysis |
 | Fit model | double exponential | Configure Fit |
 | PLS `beta` | 8, allowed 5–12 | Configure Fit |
 | Smoothing / downsampling | off | Full trace analysis |

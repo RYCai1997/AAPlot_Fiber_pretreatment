@@ -1014,19 +1014,15 @@ def calculate_normalized_traces(
     smooth_seconds: float,
     sample_rate_hz: float,
     zero_time_min: float | None = None,
-    f0_overrides: dict[str, float] | None = None,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Calculate dF/F0 and z-score from a user-selected baseline interval.
 
-    ``f0_overrides`` maps ``"analysis"`` and wavelength labels to an F0 taken from the
-    fitting baseline (already offset-subtracted). An override replaces both the level the
-    trace is referenced to and the denominator, so editing the baseline moves dF/F0; the
-    interval still decides the Z-score centre and scale.
+    F0 is the mean of the corrected trace inside the baseline interval, for the analysis
+    trace and for every wavelength separately; dF/F0 divides by it and the Z-score divides
+    the dF/F0 by its own standard deviation in the same interval.
     """
     if baseline_end_min <= baseline_start_min:
         raise ValueError("The normalization baseline end time must be greater than the start time.")
-    overrides = {str(key): float(value) for key, value in (f0_overrides or {}).items()
-                 if value is not None and np.isfinite(float(value)) and float(value) > 0}
     result = processed.copy()
     time_min = result["time_min"].to_numpy(float)
     trace = result["analysis_trace"].to_numpy(float)
@@ -1034,17 +1030,11 @@ def calculate_normalized_traces(
                      & np.isfinite(trace))
     if baseline_mask.sum() < 20:
         raise ValueError("The normalization baseline interval contains fewer than 20 valid data points.")
-    level = float(np.mean(trace[baseline_mask]))
-    f0 = overrides.get("analysis")
-    f0_source = "denominator: fitting baseline minus offset"
-    if f0 is None:
-        f0 = level
-        f0_source = "denominator: mean of the baseline interval"
+    f0 = float(np.mean(trace[baseline_mask]))
     if not np.isfinite(f0) or np.isclose(f0, 0):
-        raise ValueError("F0 is zero or invalid, so dF/F0 cannot be calculated.")
-    # The numerator stays referenced to the trace's own baseline level, so the curve starts
-    # at zero; the denominator is the fluorescence the user declared.
-    dff = 100.0 * (trace - level) / f0
+        raise ValueError("F0 in the normalization baseline interval is zero or invalid, so "
+                         "dF/F0 cannot be calculated.")
+    dff = 100.0 * (trace - f0) / f0
     baseline_dff = dff[baseline_mask & np.isfinite(dff)]
     z_center = float(np.mean(baseline_dff))
     z_scale = float(np.std(baseline_dff, ddof=1))
@@ -1076,13 +1066,10 @@ def calculate_normalized_traces(
             result[f"dff_{label}_percent_smoothed"] = np.full(len(result), np.nan)
             result[f"zscore_{label}_smoothed"] = np.full(len(result), np.nan)
             continue
-        channel_level = float(np.mean(values[valid_baseline]))
-        channel_f0 = overrides.get(label)
-        if channel_f0 is None:
-            channel_f0 = channel_level
+        channel_f0 = float(np.mean(values[valid_baseline]))
         if not np.isfinite(channel_f0) or np.isclose(channel_f0, 0):
             raise ValueError(f"F0 for corrected {label} is zero or invalid.")
-        channel_dff = 100.0 * (values - channel_level) / channel_f0
+        channel_dff = 100.0 * (values - channel_f0) / channel_f0
         baseline_channel_dff = channel_dff[valid_baseline]
         channel_sd = float(np.std(baseline_channel_dff, ddof=1))
         if not np.isfinite(channel_sd) or channel_sd <= np.finfo(float).eps:
@@ -1113,9 +1100,7 @@ def calculate_normalized_traces(
         "baseline_end_min": float(baseline_end_min),
         "samples": int(baseline_mask.sum()),
         "f0_mean": f0,
-        "f0_source": f0_source,
-        "level_mean": level,
-        "f0_overrides": {key: float(value) for key, value in overrides.items()},
+        "f0_source": "mean of the corrected trace in the baseline interval",
         "dff_baseline_mean": z_center,
         "dff_baseline_sd": z_scale,
         "smooth_seconds": float(smooth_seconds),
@@ -1133,7 +1118,6 @@ def calculate_event_locked_traces(
     post_seconds: float,
     baseline_seconds: float,
     signal_column: str = "analysis_trace",
-    f0_override: float | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
     """Split a corrected signal around repeated events and normalize each trial independently."""
     if signal_column not in processed:
@@ -1191,11 +1175,8 @@ def calculate_event_locked_traces(
             continue
         trace = np.interp(absolute_time, time_s, signal)
         baseline_values = trace[baseline_mask]
-        # A typed fitting baseline (minus its offset) is the denominator, so editing it moves
-        # the trial dF/F0 exactly as it moves the whole-trace dF/F0; the numerator is still
-        # referenced to this trial's own pre-marker level.
-        level = float(np.mean(baseline_values))
-        f0 = float(f0_override) if f0_override is not None else level
+        # F0 is this trial's own pre-marker mean, measured on the corrected trace.
+        f0 = float(np.mean(baseline_values))
         if not np.isfinite(f0) or np.isclose(f0, 0):
             excluded.append({
                 "event_index": event_index,
@@ -1203,7 +1184,7 @@ def calculate_event_locked_traces(
                 "reason": "the trial baseline mean is zero or invalid",
             })
             continue
-        dff = 100.0 * (trace - level) / f0
+        dff = 100.0 * (trace - f0) / f0
         baseline_dff = dff[baseline_mask]
         baseline_center = float(np.mean(baseline_dff))
         baseline_sd = float(np.std(baseline_dff, ddof=1))

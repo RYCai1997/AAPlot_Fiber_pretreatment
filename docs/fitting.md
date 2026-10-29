@@ -49,25 +49,25 @@ Use the plotted **Fit** curve together with the reported `correction_constant` a
 `correction_scale` in `parameters_and_marker_edits.json` to verify what was subtracted and
 where the trace was anchored.
 
-### Fitting Baseline, and the F0 it defines
+### Fitting Baseline, and the level it sets
 
 The **Fitting Baseline** is the **lowest point of the trace after bleaching** — the plateau the
-signal decays to — read off the **raw** plot, so it still contains the instrument offset.
-Everything downstream — the fit, the corrected traces, dF/F0 — works on the `raw − offset`
-scale, so the offset is subtracted from the entered baseline as well:
+signal decays to — read off the **raw** plot, so it still contains the instrument offset. The
+offset is subtracted from it, and the difference is where the corrected trace is placed:
 
 ```
-F0 = fitting baseline − offset
+level of the corrected trace = fitting baseline − offset
+corrected(t)              = raw(t) − F(t) + (fitting baseline − offset)
 ```
 
-That F0 is the scale of the corrected trace and the denominator of dF/F0, for the whole trace
-and for every event trial, so it has to be right: a baseline that is too large makes the
-response look too small and vice versa. Both fields therefore change the numbers you get:
+Downstream nothing reads the typed values again: dF/F0 is normalised by the mean of the
+**corrected** trace inside the chosen baseline window, so the two fields act by moving that
+level:
 
 | Edited | Effect |
 | --- | --- |
-| Offset | Subtracted from the trace *and* from F0, so dF/F0 rises as the offset rises (a too-small offset under-reports the response) |
-| Fitting baseline | Sets F0 directly; dF/F0 scales as `1 / F0` |
+| Offset | Subtracted from the trace *and* from the level, so the corrected trace and the measured F0 drop by the same amount — the percentages rise as the offset rises (a too-small offset under-reports the response) |
+| Fitting baseline | Raises or lowers the corrected level one-for-one; F0 is measured there, so dF/F0 scales as `1 / F0` |
 
 The same value is the asymptote estimate the fit uses: `fit_constant` starts there and lets the
 optimizer refine it, while `fixed` pins the asymptote to it. Because the field holds the minimum
