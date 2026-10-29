@@ -2319,7 +2319,11 @@ class PretreatmentApp:
                     )
         except Exception as exc:
             self.pending_continuation = None
-            messagebox.showerror("Processing Failed", str(exc)); self.vars["status"].set(f"Processing failed: {exc}")
+            stale = (" The plot and the analysis still show the previous correction, not what "
+                     "these settings would give.")
+            hint = self.observed_range_note() if "baseline" in str(exc).lower() else ""
+            messagebox.showerror("Processing Failed", str(exc) + hint + stale)
+            self.vars["status"].set(f"Processing failed: {exc}.{stale}")
             return
         self.start_fit_job(config)
 
@@ -2400,7 +2404,9 @@ class PretreatmentApp:
         else:
             from tkinter import messagebox
             self.pending_continuation = None
-            messagebox.showerror("Processing Failed", str(payload))
+            messagebox.showerror(
+                "Processing Failed",
+                f"{payload}\n\nThe plot and the analysis still show the previous correction.")
             self.vars["status"].set(f"Processing failed: {payload}")
 
     def cancel_fit_job(self) -> None:
@@ -2960,6 +2966,25 @@ class PretreatmentApp:
         self.initialize_hover_artists(); self.initialize_box_zoom()
         self.update_scale_readouts(); self.canvas.draw_idle()
         self.report_plot_mismatches()
+
+    def observed_range_note(self) -> str:
+        """Raw range per visible wavelength, so a rejected baseline can be corrected at once."""
+        if self.data is None:
+            return ""
+        source = self.source_channel_var.get()
+        parts = []
+        for channel in self.available_wavelengths:
+            column = f"{source}-{channel}"
+            if column not in self.data:
+                continue
+            values = self.data[column].to_numpy(float)
+            finite = values[np.isfinite(values)]
+            if not finite.size:
+                continue
+            parts.append(f"{channel} {finite.min():.4g}–{finite.max():.4g} (lowest {finite.min():.4g})")
+        if not parts:
+            return ""
+        return " The raw trace runs " + "; ".join(parts) + "."
 
     def dff_axis_label(self, prefix: str) -> str:
         """Axis label that carries the F0 the curve was divided by."""
