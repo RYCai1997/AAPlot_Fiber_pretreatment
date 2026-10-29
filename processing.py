@@ -758,6 +758,12 @@ def process_data(
                 if len(cache) >= 12:
                     cache.clear()
                 cache[cache_key] = (np.array(fitted, float, copy=True), copy.deepcopy(parameters))
+        fitted = np.asarray(fitted, float)
+        if fitted.shape != adjusted.shape:
+            raise ValueError(
+                f"The {wavelength} fit returned {fitted.size:,} points for {adjusted.size:,} samples. "
+                "This is a bug rather than a data problem; report it with the recording."
+            )
         parameters["fit_regions"] = [list(region) for region in regions]
         constant = parameters.get("fitted_constant")
         if constant is None:
@@ -767,8 +773,11 @@ def process_data(
         # Correction divides by the bleaching factor normalized to 1 at t0, so the
         # corrected trace keeps the fluorescence scale of (raw - offset) and the
         # transient is not attenuated by the residual bleaching.
-        scale = float(fitted[0])
-        if not np.isfinite(scale) or np.isclose(scale, 0):
+        finite_fit = np.isfinite(fitted)
+        if not finite_fit.any():
+            raise ValueError(f"The fitted {wavelength} curve has no finite value.")
+        scale = float(fitted[finite_fit][0])
+        if np.isclose(scale, 0):
             raise ValueError(
                 f"The fitted {wavelength} curve is zero at the start of the trace; "
                 "the correction cannot be calculated."
@@ -779,6 +788,14 @@ def process_data(
             )
         channel_corrected = adjusted * (scale / fitted)
         parameters["correction_scale"] = scale
+        missing = int((~np.isfinite(raw)).sum())
+        if np.isfinite(raw).sum() != raw.shape[0]:
+            first_bad = float(time_min[~np.isfinite(raw)][0])
+            parameters.setdefault("fit_warnings", []).append(
+                f"{missing} sample(s) of {wavelength} are empty or non-numeric (first at "
+                f"{first_bad:.3f} min); they are left out of the fit and the corrected trace "
+                "is a gap there"
+            )
         if baseline_mode == "fixed" and float(baseline) != 0.0:
             tail = adjusted[np.isfinite(adjusted)][-max(20, int(0.05 * np.isfinite(adjusted).sum())):]
             plateau = float(np.median(tail)) if tail.size else float("nan")
@@ -857,6 +874,8 @@ def process_data(
         "reference_wavelength": reference,
         "fit_parameters": fit_parameters,
         **{f"fit_{wavelength}_parameters": fit_parameters[wavelength] for wavelength in wavelengths},
+        "missing_samples": {wavelength: int((~np.isfinite(subset[f"{source}-{wavelength}"].to_numpy(float))).sum())
+                            for wavelength in wavelengths},
         "analysis_reference_from_user_baselines": float(analysis_reference),
         "combine": config.combine if reference is not None else None,
         "reference_weight": None if weight_used is None else float(weight_used),
@@ -1211,11 +1230,13 @@ def fit_penalized_baseline(
     stable range. Long recordings are decimated before fitting and the result is
     interpolated back, which is the down-sampling variant of the same algorithm.
     """
-    x = np.asarray(time_s, float)
-    x = x - float(x[0])
-    y = np.asarray(values, float)
-    keep = np.isfinite(x) & np.isfinite(y)
-    x, y = x[keep], y[keep]
+    x_full = np.asarray(time_s, float)
+    x = x_full - float(x_full[0])
+    y_full = np.asarray(values, float)
+    keep = np.isfinite(x) & np.isfinite(y_full)
+    total = x.shape[0]
+    dropped = int(total - keep.sum())
+    x, y = x[keep], y_full[keep]
     if x.size < 50:
         raise ValueError("Fewer than 50 valid samples are available for the PLS fit.")
     beta = float(np.clip(PLS_DEFAULT_BETA if beta is None else beta, PLS_MIN_BETA, PLS_MAX_BETA))
@@ -1253,7 +1274,10 @@ def fit_penalized_baseline(
             break
 
     fitted_grid = np.exp(fitted_log)
-    fitted = np.interp(x, grid_x, fitted_grid)
+    # The fit only sees finite samples, but the returned curve has to line up with the
+    # caller's arrays: a single empty cell must not change the length of the result.
+    fitted = np.full(total, np.nan)
+    fitted[keep] = np.interp(x, grid_x, fitted_grid)
     knot_index = sample_indices(n, PLS_KNOT_COUNT)
     parameters: dict[str, Any] = {
         "model": "penalized",
@@ -1265,6 +1289,7 @@ def fit_penalized_baseline(
         "converged": bool(converged),
         "tolerance": float(PLS_TOLERANCE),
         "fit_points": int(n),
+        "dropped_samples": dropped,
         "downsampled": bool(n < x.size),
         "curve_knots_t": [float(value) for value in grid_x[knot_index]],
         "curve_knots_z": [float(value) for value in fitted_grid[knot_index]],

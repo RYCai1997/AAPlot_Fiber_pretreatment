@@ -31,6 +31,11 @@ skipped; the data table starts on the second line.
   the `Name` column.
 - Rows without a valid `TimeStamp` are dropped and the table is sorted by time. At least
   20 valid samples are required.
+- An empty or non-numeric cell in a fluorescence column is kept as a **gap**: the sample is
+  left out of the fit, the corrected trace and every trace derived from it are NaN there,
+  and the status line names the channel and the count (`Empty or non-numeric cells were
+  skipped (470: 1 sample(s))`). Nothing else shifts, so the trace keeps its timestamps and
+  the plots show a one-sample gap instead of a drop to zero.
 
 Markers can be added, deleted, or restored in **Markers (Working Copy)** on the **Data &
 Fitting** tab. Edits are kept in memory and are written to `markers_working_copy.csv` on
@@ -574,6 +579,15 @@ Original input files are read-only and are never modified.
 
 ### 2026-10-29
 
+- Fixed `operands could not be broadcast together with shapes (14062,) (14061,)` when a
+  recording held one empty or non-numeric fluorescence cell. The PLS fit dropped the
+  non-finite sample internally and returned a curve one sample shorter than the trace, so
+  the correction could not be applied — and, before that, the fit could not be drawn.
+  `fit_penalized_baseline` now returns a curve of the input length with NaN where the data
+  is missing, the correction is normalised on the first finite fitted value instead of
+  `fitted[0]`, and the applied result reports how many cells were skipped and where the
+  first one is. This is the same single missing sample that surfaced earlier as
+  `x and y must have same first dimension`.
 - Reproduced RWD's 470/410 motion correction as a third channel combination, `rwd`, and
   made it the default. The corrected analysis channel is regressed on the corrected
   reference with a robust (`soft_l1`) straight line, the fitted prediction is subtracted,

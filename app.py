@@ -2384,10 +2384,18 @@ class PretreatmentApp:
             offset_note = " Offset used: " + ", ".join(
                 f"{channel}={applied.offsets.get(channel, 0.0):g}" for channel in applied.wavelengths
             ) + "."
+        missing = {channel: int(count) for channel, count in
+                   ((self.details or {}).get("missing_samples") or {}).items() if count}
+        missing_note = ""
+        if missing:
+            detail = ", ".join(f"{channel}: {count:,}" for channel, count in sorted(missing.items()))
+            missing_note = (f" Empty or non-numeric cells were skipped ({detail} sample(s)); "
+                            "they show as a gap and are left out of the fit.")
+            record_error(f"missing samples in the recording: {detail}")
         self.vars["status"].set(
-            f"Correction complete: {len(self.processed):,} points.{offset_note}{scope} The current display "
-            "remains unsmoothed and not downsampled. Apply display processing from the Full trace analysis tab "
-            "if needed."
+            f"Correction complete: {len(self.processed):,} points.{offset_note}{missing_note}{scope} "
+            "The current display remains unsmoothed and not downsampled. Apply display processing from "
+            "the Full trace analysis tab if needed."
         )
         continuation, self.pending_continuation = self.pending_continuation, None
         if continuation is not None:
