@@ -18,6 +18,32 @@ from typing import Any, Callable
 import numpy as np
 import pandas as pd
 
+BUILD_ID: str | None = None
+
+
+def build_id() -> str:
+    """Short commit of the code that is running, so a stale copy is obvious."""
+    global BUILD_ID
+    if BUILD_ID is not None:
+        return BUILD_ID
+    label = ""
+    try:
+        import subprocess
+        result = subprocess.run(["git", "-C", str(Path(__file__).parent), "rev-parse", "--short", "HEAD"],
+                                capture_output=True, text=True, timeout=5)
+        if result.returncode == 0:
+            label = result.stdout.strip()
+    except Exception:  # noqa: BLE001 - no git, no label; the timestamp below still helps
+        label = ""
+    if not label:
+        try:
+            label = time.strftime("%Y-%m-%d %H:%M", time.localtime(Path(__file__).stat().st_mtime))
+        except Exception:  # noqa: BLE001
+            label = "unknown"
+    BUILD_ID = label
+    return BUILD_ID
+
+
 ERROR_LOG_NAME = "aaplot_errors.log"
 # Lengths of series that had to be trimmed before plotting, newest last.
 PLOT_MISMATCHES: list[tuple[int, ...]] = []
@@ -103,7 +129,8 @@ DEFAULT_STRINGS = {
     "estimate_exclude_before": "5", "estimate_exclude_after": "60",
     "event_status": "Select a marker name after loading data.",
     "x_start": "", "x_span": "", "x_end": "", "output_name": "",
-    "marker_time": "0", "marker_name": "marker", "status": "Select a recording folder.",
+    "marker_time": "0", "marker_name": "marker",
+    "status": f"Select a recording folder. (build {build_id()})",
 }
 
 LINE_WIDTH_LABELS = {
