@@ -48,8 +48,9 @@ tab. Edits are kept in memory and written to `markers_working_copy.csv` on expor
    the **Valid Data Range**, then enter each visible **Offset** and **Fitting Baseline**. The
    baseline is the fluorescence level you read off the **raw** trace at the start of the
    recording, so it still contains the offset: the program subtracts the offset from it and uses
-   the result as F0, the denominator of dF/F0. A baseline that is not larger than the offset is
-   read as an already offset-subtracted level, and the status line says so.
+   the result as F0, the scale of the corrected trace and the denominator of dF/F0. A baseline
+   that is not larger than the offset is rejected with an error naming the channel, because
+   nothing would be left of it once the offset is removed.
 2. Open **Configure <wavelength> Fit...** for every wavelength, select one or more regions and a
    model, preview, and confirm.
 3. Choose the **Analysis Wavelength** and, optionally, a **Reference Wavelength** with a
@@ -102,7 +103,8 @@ the exact file list.
 | Apply does nothing / asks to confirm regions | A data-range, model or baseline-mode change invalidates that channel's confirmed fit. Offset and baseline edits do not. |
 | Event results vanish after changing the combination | Trials are computed from the stored combination trace, so they are cleared and must be recalculated. |
 | A single-wavelength recording | Set **Reference Wavelength** to `None`; the combination is skipped and the corrected channel is analysed on its own. |
-| dF/F0 comes out about twice too large or too small | Check the **Fitting Baseline**: it must be the raw level at t0, offset included. F0 = baseline − offset, so typing an already-subtracted value halves the denominator when the offset is small, or triggers the fallback note when it is large. |
+| `The fitting baseline for 470 (...) must be larger than the offset` | The baseline is the **raw** level, offset included; F0 = baseline − offset has to stay positive. Enter the level you read off the raw trace, or correct the offset. |
+| dF/F0 comes out about twice too large or too small | Check that the **Fitting Baseline** is the raw level at t0 and not an already-subtracted one: F0 is the denominator, so a wrong baseline scales every dF/F0 by the same factor. |
 
 ## Author and development
 

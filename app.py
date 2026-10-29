@@ -172,9 +172,12 @@ class FitWindow:
         raw = subset[f"{config.source_channel}-{channel}"].to_numpy(float)
         offset = config.offsets[channel]
         # The window previews the same fit Apply runs, so it uses the offset-subtracted
-        # baseline the plateau in the field refers to.
-        self.baseline = effective_baseline(config.baselines[channel], offset)[0] \
-            or config.baselines[channel]
+        # baseline the plateau in the field refers to. A baseline that cannot be used yet
+        # (blank, or not larger than the offset) only leaves the constant free.
+        try:
+            self.baseline = effective_baseline(config.baselines[channel], offset, channel)
+        except ValueError:
+            self.baseline = 0.0
         self.values = raw - offset
         self.regions = [tuple(sorted(region)) for region in existing_regions]
         start, end = float(self.time_min[0]), float(self.time_min[-1])
@@ -814,9 +817,9 @@ class PretreatmentApp:
             self.wavelength_frames[wavelength] = frame
             frame.grid_remove()
         row = self.section(data_tab, row, "Correction")
-        ttk.Label(data_tab, text="Corrected = (raw − offset) × fitted(t0) / fitted(t)\n"
-                                 "The bleaching factor is normalised to 1 at the start, so the trace keeps "
-                                 "the fluorescence scale of (raw − offset).",
+        ttk.Label(data_tab, text="Corrected = F0 + [(raw − offset) − fitted(t)]\n"
+                                 "F0 = Fitting Baseline − Offset: the trace sits on the fluorescence you "
+                                 "entered, and dF/F0 is divided by the same F0.",
                   wraplength=350, justify="left").grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 6)); row += 1
         row = self.section(data_tab, row, "Analysis Trace")
         ttk.Label(data_tab, text="Analysis Wavelength").grid(row=row, column=0, sticky="w")
@@ -1269,27 +1272,28 @@ class PretreatmentApp:
             raise ValueError(f"{key} must be a finite number.")
         return value
 
-    def fit_f0(self, channel: str) -> tuple[float | None, str]:
-        """F0 of one channel from its fitting baseline, with the offset already removed."""
-        try:
-            baseline = self.optional_number(f"baseline{channel}")
-            offset = self.optional_number(f"offset{channel}")
-        except Exception:  # noqa: BLE001 - an unparseable field simply gives no F0
-            return None, ""
-        return effective_baseline(baseline, offset)
+    def fit_f0(self, channel: str) -> float:
+        """F0 of one channel: its fitting baseline minus the offset. Raises when unusable."""
+        baseline = self.optional_number(f"baseline{channel}")
+        offset = self.optional_number(f"offset{channel}")
+        return effective_baseline(baseline, offset, channel)
+
+    def combined_f0(self) -> float:
+        """F0 of the analysis trace: the analysis F0, or the ratio of both F0s."""
+        analysis = self.fit_f0(self.analysis_wavelength_var.get())
+        if self.vars["combine"].get() != "ratio":
+            return analysis
+        reference = self.reference_wavelength_var.get()
+        if reference in {"", "None"}:
+            return analysis
+        reference_f0 = self.fit_f0(reference)
+        return analysis / reference_f0
 
     def f0_overrides(self) -> dict[str, float]:
         """F0 values the typed baselines impose, keyed the way the normalizer expects."""
-        overrides: dict[str, float] = {}
-        analysis = self.analysis_wavelength_var.get()
-        combined_is_counts = self.vars["combine"].get() != "ratio"
-        f0, _note = self.fit_f0(analysis)
-        if f0 is not None and combined_is_counts:
-            overrides["analysis"] = float(f0)
+        overrides: dict[str, float] = {"analysis": self.combined_f0()}
         for channel in self.available_wavelengths:
-            channel_f0, _note = self.fit_f0(channel)
-            if channel_f0 is not None:
-                overrides[channel] = float(channel_f0)
+            overrides[channel] = self.fit_f0(channel)
         return overrides
 
     def optional_number(self, key: str) -> float | None:
@@ -1427,6 +1431,10 @@ class PretreatmentApp:
         )
         if config.range_end_min <= config.range_start_min:
             raise ValueError("The valid range end must be greater than the start.")
+        # F0 is baseline minus offset, so a baseline that does not exceed the offset cannot
+        # describe fluorescence; refuse it here instead of during the fit.
+        for channel in wavelengths:
+            effective_baseline(config.baselines[channel], config.offsets[channel], channel)
         if config.combine not in COMBINE_MODES:
             raise ValueError(f"Unknown channel combination: {config.combine}")
         # With no reference wavelength the combination is not used at all, so the analysis
@@ -1957,9 +1965,13 @@ class PretreatmentApp:
             baseline_mode = config.fit_baseline_modes.get(channel) or "fit_constant"
             beta = config.fit_betas.get(channel)
             lam = config.fit_lambdas.get(channel)
+            # The key has to match the one process_data builds, which uses the
+            # offset-subtracted baseline F0 rather than the raw entry.
+            effective = effective_baseline(float(config.baselines[channel]),
+                                           float(config.offsets[channel]), channel)
             key = fit_cache_key(
                 token, source, f"{source}-{channel}", model, baseline_mode,
-                float(config.offsets[channel]), float(config.baselines[channel]),
+                float(config.offsets[channel]), effective,
                 [tuple(region) for region in config.fit_regions.get(channel) or []],
                 config.range_start_min, config.range_end_min,
                 None if beta is None else float(beta), None if lam is None else float(lam),
@@ -3408,19 +3420,12 @@ class PretreatmentApp:
         return (marker_name, pre_seconds, post_seconds, baseline_seconds,
                 selected_ids, selected_signal_keys)
 
-    def event_signal_f0(self, signal: dict[str, str]) -> float | None:
-        """F0 of one event signal, taken from the fitting baseline of its own channel.
-
-        A ratio trace lives on no count scale, so it keeps the per-trial baseline mean.
-        """
+    def event_signal_f0(self, signal: dict[str, str]) -> float:
+        """F0 of one event signal: its channel's F0, or both F0s divided for a ratio."""
         if signal.get("kind") == "wavelength":
             channel = str(signal.get("key", "")).split(":", 1)[-1]
-        else:
-            if self.vars["combine"].get() == "ratio":
-                return None
-            channel = self.analysis_wavelength_var.get()
-        f0, _note = self.fit_f0(channel)
-        return None if f0 is None else float(f0)
+            return self.fit_f0(channel)
+        return self.combined_f0()
 
     def calculate_event_analysis(self, allow_refresh: bool = True) -> None:
         from tkinter import messagebox
@@ -3655,11 +3660,9 @@ class PretreatmentApp:
             self.display_cache.clear()
             self.rebuild_axes(); self.draw_processed()
             source = normalization_details.get("f0_source", "")
-            f0_note = self.fit_f0(self.analysis_wavelength_var.get())[1]
             self.vars["status"].set(
                 f"Normalization complete: F0={normalization_details['f0_mean']:.7g} "
                 f"({source}), baseline samples={normalization_details['samples']:,}."
-                + (f" {f0_note}." if f0_note else "")
             )
         except Exception as exc:
             messagebox.showerror("Normalization Failed", str(exc))

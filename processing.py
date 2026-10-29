@@ -725,29 +725,34 @@ def estimate_reference_weight(
 def effective_baseline(
     baseline: float | None,
     offset: float | None,
-) -> tuple[float | None, str]:
-    """Turn the entered fitting baseline into the F0 of the offset-subtracted trace.
+    label: str = "",
+) -> float:
+    """F0 of a channel: the entered fitting baseline minus the instrument offset.
 
-    The fit, the corrected traces and dF/F0 all live on the ``raw - offset`` scale, so a
-    plateau typed from the raw trace still contains the instrument offset and has to have
-    it removed. Returns ``(F0, note)``; ``F0`` is None when no baseline was entered and
-    ``note`` explains a fallback, empty otherwise.
+    The fit, the corrected traces and dF/F0 all live on the ``raw - offset`` scale, so the
+    plateau typed from the raw trace still contains the offset and has to have it removed.
+    A baseline that does not exceed the offset cannot describe fluorescence and is rejected
+    instead of being reinterpreted.
     """
+    tag = f" for {label}" if label else ""
     if baseline is None:
-        return None, ""
+        raise ValueError(f"Enter the fitting baseline{tag}: it is the raw fluorescence level "
+                         "at the start of the recording, offset included.")
     try:
         baseline = float(baseline)
-    except (TypeError, ValueError):
-        return None, ""
-    if not np.isfinite(baseline) or baseline <= 0:
-        return None, ""
-    offset = 0.0 if offset is None else float(offset)
-    candidate = baseline - offset
-    if not np.isfinite(candidate) or candidate <= 0:
-        return baseline, ("The fitting baseline is not larger than the offset, so it is read as an "
-                          "already offset-subtracted level; enter the raw fluorescence level if it "
-                          "was meant to include the offset")
-    return candidate, ""
+        offset = 0.0 if offset is None else float(offset)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"The fitting baseline{tag} and its offset must be numbers.") from exc
+    if not np.isfinite(baseline) or not np.isfinite(offset):
+        raise ValueError(f"The fitting baseline{tag} and its offset must be finite numbers.")
+    f0 = baseline - offset
+    if f0 <= 0:
+        raise ValueError(
+            f"The fitting baseline{tag} ({baseline:g}) must be larger than the offset "
+            f"({offset:g}): it is the raw fluorescence level, which still contains the offset, "
+            f"so F0 = baseline - offset has to be positive (got {f0:g})."
+        )
+    return float(f0)
 
 
 def select_effective_data(data: pd.DataFrame, config: ProcessingConfig) -> pd.DataFrame:
@@ -824,9 +829,7 @@ def process_data(
         offset = float(config.offsets[wavelength])
         baseline = float(config.baselines[wavelength])
         # The fit works on (raw - offset), so the entered plateau has to lose the offset too.
-        fit_baseline, baseline_note = effective_baseline(baseline if baseline else None, offset)
-        if fit_baseline is None:
-            fit_baseline = baseline
+        fit_baseline = effective_baseline(baseline, offset, wavelength)
         adjusted = raw - offset
         regions = [tuple(region) for region in config.fit_regions.get(wavelength, [])]
         mask = region_mask(time_min, regions)
@@ -862,30 +865,29 @@ def process_data(
         parameters["fit_regions"] = [list(region) for region in regions]
         parameters["entered_baseline"] = float(baseline)
         parameters["effective_baseline"] = float(fit_baseline)
-        if baseline_note:
-            parameters.setdefault("fit_warnings", []).append(baseline_note)
         constant = parameters.get("fitted_constant")
         if constant is None:
             constant = parameters.get("fixed_baseline", 0.0)
         constant = float(constant)
         parameters["correction_constant"] = constant
-        # Correction divides by the bleaching factor normalized to 1 at t0, so the
-        # corrected trace keeps the fluorescence scale of (raw - offset) and the
-        # transient is not attenuated by the residual bleaching.
-        finite_fit = np.isfinite(fitted)
-        if not finite_fit.any():
+        # The fitted bleaching curve is subtracted in counts and the result is placed on F0,
+        # so the corrected trace sits on the fluorescence the user declared:
+        #     corrected = F0 + [(raw - offset) - F(t)]
+        # Nothing here depends on the fitted level at t0, and F0 stays a pure scale: it is
+        # the denominator of dF/F0 rather than a factor that would cancel against itself.
+        if not np.isfinite(fitted).any():
             raise ValueError(f"The fitted {wavelength} curve has no finite value.")
-        scale = float(fitted[finite_fit][0])
-        if np.isclose(scale, 0):
+        scale = float(fit_baseline)
+        if not np.isfinite(scale) or scale <= 0:
             raise ValueError(
-                f"The fitted {wavelength} curve is zero at the start of the trace; "
+                f"F0 for {wavelength} is not positive (baseline {baseline:g} - offset {offset:g}); "
                 "the correction cannot be calculated."
             )
-        if np.any(np.isfinite(fitted) & (np.abs(fitted) < 1e-3 * abs(scale))):
+        if np.any(np.isfinite(fitted) & (fitted <= 0)):
             raise ValueError(
-                f"The fitted {wavelength} curve approaches zero. Adjust its offset or fitting regions."
+                f"The fitted {wavelength} curve is not positive. Adjust its offset or fitting regions."
             )
-        channel_corrected = adjusted * (scale / fitted)
+        channel_corrected = scale + (adjusted - fitted)
         parameters["correction_scale"] = scale
         missing = int((~np.isfinite(raw)).sum())
         if np.isfinite(raw).sum() != raw.shape[0]:
@@ -924,9 +926,9 @@ def process_data(
         # RWD motion correction: robust linear fit of the signal on the control, the
         # fitted prediction is subtracted, and the result is placed back on the level of
         # the raw trace so dF/F0 divides by the median of the full-time raw fluorescence.
-        raw_level = float(np.nanmedian(adjusted_traces[primary]))
+        level_analysis = float(fit_parameters[primary]["effective_baseline"])
         analysis_trace, level, slope, intercept, used = rwd_motion_corrected(
-            corrected[primary], corrected[reference], raw_level)
+            corrected[primary], corrected[reference], level_analysis)
         combined = analysis_trace.copy()
         combined_label = rwd_motion_label(primary, slope, intercept)
         analysis_reference = level
@@ -936,7 +938,7 @@ def process_data(
             "intercept": intercept,
             "samples": used,
             "median_signal": level,
-            "denominator": "median of the full-time raw analysis trace after offset subtraction",
+            "denominator": "F0 of the analysis channel (fitting baseline minus offset)",
         }
     elif reference is not None:
         combined, combined_label, analysis_reference, weight_used = combine_channels(
@@ -985,13 +987,15 @@ def process_data(
         "normalization": None,
         "source_channel": source,
         "definitions": {
-            "baseline": "user value is either a fixed model constant or the initial estimate for a fitted constant, as recorded per channel",
-            "corrected_channel": "(raw - offset) x (fitted at t0 / fitted); the bleaching factor is normalised to 1 at t0",
+            "baseline": ("raw fluorescence level at the start of the recording; F0 = baseline - offset, "
+                         "used as the correction scale and as the dF/F0 denominator"),
+            "corrected_channel": ("F0 + [(raw - offset) - fitted]; F0 = baseline - offset, "
+                                  "never the fitted level at t0"),
             "combined_channel": {
                 "ratio": "corrected analysis / corrected reference",
                 "difference": "corrected analysis - weight x (corrected reference - its level); only the reference deviation is removed",
                 "rwd": ("RWD motion correction: corrected analysis - (slope x corrected reference + intercept), "
-                        "then scaled by the median of the full offset-subtracted analysis trace"),
+                        "then placed on F0 of the analysis channel"),
             }[config.combine],
             "reference_weight": ("fitted robustly from the recording and not user-editable"
                                  if config.combine == "rwd"

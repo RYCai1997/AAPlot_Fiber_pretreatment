@@ -5,21 +5,22 @@ manual.
 
 ## 2026-10-29
 
-- The **Fitting Baseline** now defines F0 instead of being absorbed by the fit. It is read as
-  the raw fluorescence level at the start of the recording, the offset is subtracted from it
-  (`F0 = baseline − offset`), and that F0 is the denominator of dF/F0 both for the whole trace
-  and for every event trial. Previously the fit took the value as an initial guess and the
-  correction divided by it, so the two cancelled: editing the baseline changed nothing, and
-  editing the offset only nudged the answer. Now dF/F0 scales as `1 / F0`, a larger offset
-  raises the response, and the whole-trace and event results move together.
+- The bleaching correction is now additive and the **Fitting Baseline** defines F0:
+  `corrected = F0 + [(raw − offset) − F(t)]`, with `F0 = baseline − offset`. The fitted decay is
+  subtracted in counts, the corrected trace sits on the fluorescence the user declared, and F0 is
+  the denominator of dF/F0 both for the whole trace and for every event trial. Editing the
+  baseline now moves every number (`1 / F0`), and editing the offset moves it too, instead of the
+  two cancelling inside the fit.
+- The correction no longer uses the fitted level at t₀ anywhere. Anchoring on the first sample
+  made the scale depend on where the recording started, on its fastest decay component and on
+  one noisy point; the scale is the declared F0 now, and each channel records
+  `entered_baseline` and `effective_baseline`.
+- A baseline that is not larger than the offset is refused with an error naming the channel,
+  instead of being reinterpreted as an already subtracted level.
+- A ratio trace is divided after each channel has had its offset removed, and its F0 is
+  `F0₁ / F0₂`, so a baseline edit moves the ratio dF/F0 as well.
 - The numerator of dF/F0 is still referenced to the mean of the baseline interval, so the trace
-  keeps starting at zero; only the denominator comes from the declared baseline. A ratio trace
-  has no count scale and keeps the interval mean.
-- A baseline that is not larger than the offset is read as an already offset-subtracted level
-  and the reason is written to `fit_warnings` and the status line, so an old session cannot
-  silently produce a negative F0. Each channel records `entered_baseline` and
-  `effective_baseline`, and the fit-window preview uses the same offset-subtracted value the
-  Apply button does.
+  keeps starting at zero; only the denominator comes from the declared baseline.
 - Reproduced RWD's 470/410 motion correction as a third channel combination, `rwd`, and made it
   the default. The corrected analysis channel is regressed on the corrected reference with a
   robust (`soft_l1`) straight line, the fitted prediction is subtracted, and the result is put
@@ -43,14 +44,16 @@ manual.
 
 ## 2026-10-28
 
-- Optimised the bleaching correction: `corrected = (raw − offset) × F(t₀) / F(t)`. Dividing by
+- Optimised the bleaching correction: `corrected = (raw − offset) × F(t₀) / F(t)` *(the
+  multiplicative form was replaced by the additive one on 2026-10-29, below)*. Dividing by
   the bleaching factor normalised at t₀ un-bleaches the transient itself and keeps the
   fluorescence scale of `raw − offset`, so the user baseline no longer controls the output level.
 - The offset is subtracted before the fit and therefore reaches F0 directly. Omitting it no
   longer hides inside the fitted constant: it inflates F0 and compresses every dF/F0 by
   `F_true / (F_true + residual offset)`.
 - Corrected traces and the ratio are anchored on `F(t₀)` per channel, so the expected ratio level
-  equals `F(t₀)_analysis / F(t₀)_reference` and is written to the output details.
+  equals `F(t₀)_analysis / F(t₀)_reference` and is written to the output details *(the anchor was
+  replaced by the declared F0 on 2026-10-29)*.
 - Division by a near-zero fitted value is rejected with an explicit message instead of producing
   spikes, and `fixed`-mode baselines that disagree with the plateau are reported in
   `fit_warnings`.

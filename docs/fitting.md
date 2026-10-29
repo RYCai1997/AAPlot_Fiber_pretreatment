@@ -7,26 +7,38 @@ combination (see [channels.md](channels.md)).
 ## Bleaching correction
 
 ```
-corrected(t) = (raw(t) − offset) × F(t₀) / F(t)
+corrected(t) = F0 + [(raw(t) − offset) − F(t)]
+F0 = fitting baseline − offset
 ```
 
 - `raw(t)` is the recorded fluorescence of that wavelength.
 - `offset` is the instrument reading with no sample attached — fluorescence that carries no
   biological information. It is subtracted **before** the fit, so it can never be re-absorbed
   by the fitted constant.
-- `F(t)` is the independently fitted bleaching curve, evaluated over the whole trace.
-- `F(t₀)` normalises the bleaching factor to 1 at the start of the trace, so the corrected
-  trace keeps the fluorescence scale of `raw − offset`.
+- `F(t)` is the independently fitted bleaching curve, evaluated over the whole trace. It is
+  **subtracted**, in counts, so the corrected trace keeps the units of the recording.
+- `F0` is the fluorescence the user declared for the trace. It sets the level of the corrected
+  trace and is the denominator of dF/F0.
+
+Subtracting rather than dividing is what lets F0 stay a free scale: the numerator carries no
+factor of F0, so dF/F0 = `100 × (corrected − level) / F0` really does scale as `1 / F0`. If the
+decay were divided out and the result multiplied by F0, F0 would cancel against itself and the
+field would have no effect — which is exactly what it used to do.
+
+Note what is **not** in the formula: the fitted level at t₀. Anchoring on the first sample
+makes the scale depend on where the recording happened to start, on the fastest decay component
+and on the noise of a single point, so it is not used anywhere. The scale is the declared F0
+instead, which is reproducible and the same for every trace of a recording.
 
 Properties of this form:
 
 | Question | Behaviour |
 | --- | --- |
-| Where does the corrected trace sit? | On the `raw − offset` level at t₀, i.e. the un-bleached fluorescence |
+| Where does the corrected trace sit? | On `F0`, the fluorescence that was entered for that channel |
 | Is the bleaching removed? | Yes — divided out at every sample, so the transient itself is un-bleached, not merely shifted |
-| Does the offset matter? | Yes — it sets F0. Skipping it inflates F0 and scales every dF/F0 by `F_true / (F_true + residual offset)` |
+| Does the offset matter? | Yes — it is removed from the trace *and* from F0, so it has to be right |
 | Does the transient amplitude depend on when it occurred? | No — the same relative response at 1 min and at 10 min |
-| Does the user baseline set the output scale? | No — it only seeds the free constant (`fit_constant`) or pins it (`fixed`) |
+| Does the user baseline set the output scale? | Yes — it *is* the scale, and the dF/F0 denominator |
 
 Use the plotted **Fit** curve together with the reported `correction_constant` and
 `correction_scale` in `parameters_and_marker_edits.json` to verify what was subtracted and
@@ -43,9 +55,9 @@ the entered baseline as well:
 F0 = fitting baseline − offset
 ```
 
-That F0 is the denominator of dF/F0, for the whole trace and for every event trial, so it has
-to be right: a baseline that is too large makes the response look too small and vice versa.
-Both fields therefore change the numbers you get:
+That F0 is the scale of the corrected trace and the denominator of dF/F0, for the whole trace
+and for every event trial, so it has to be right: a baseline that is too large makes the
+response look too small and vice versa. Both fields therefore change the numbers you get:
 
 | Edited | Effect |
 | --- | --- |
@@ -61,9 +73,10 @@ by more than 5 %. Use `fit_constant` when the field holds the level at the start
 recording. Each channel's parameters record both numbers as `entered_baseline` and
 `effective_baseline`.
 
-If the entered baseline is **not larger than the offset**, the program cannot subtract the
-offset from it without going negative, so it falls back to reading the value as an
-already-subtracted level and appends the reason to `fit_warnings` and to the status line.
+A baseline that is **not larger than the offset** cannot describe fluorescence — the offset
+would have to be removed from it and nothing would be left — so the program refuses it with an
+explicit error naming the channel, the entered value and the offset it has to exceed. It is not
+reinterpreted as an already-subtracted level: that guess would silently produce a wrong F0.
 
 ## Fitting models
 
@@ -116,7 +129,7 @@ How it works:
    below `1e-5` of the log span, with a cap of 100 iterations; if the cap is reached the fit is
    marked as not converged and a warning is recorded instead of claiming success.
 3. The result is interpolated back onto the full time axis and used exactly like the other
-   models: `corrected = (raw − offset) × F(t₀) / F(t)`.
+   models: `corrected = F0 + [(raw − offset) − F(t)]`.
 
 Like RWD there is **one user-facing knob**:
 

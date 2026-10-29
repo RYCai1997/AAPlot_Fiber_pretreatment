@@ -2,7 +2,7 @@
 
 The analysis trace — the series dF/F0 and Z-score are computed from — is built from the
 corrected channels by one of three combinations. Everything on this page assumes each
-channel has already been corrected on its own (`corrected = (raw − offset) × F(t₀) / F(t)`),
+channel has already been corrected on its own (`corrected = F0 + [(raw − offset) − F(t)]`),
 so `C_analysis` and `C_reference` below are corrected traces, not raw ones.
 
 | Mode | Combination | Weight | Mirrors |
@@ -23,23 +23,27 @@ Reproduces what the RWD OFRS software does to 470 against 410, as described unde
 ```
 slope, intercept = robust linear fit of C_analysis on C_reference   ("robust linear fit")
 motion(t)        = C_analysis(t) − (slope · C_reference(t) + intercept)
-analysis(t)      = motion(t) + median(F_raw_analysis)
-dF/F0(t)         = 100 · (analysis(t) − analysis₀) / analysis₀ ,   analysis₀ = median(F_raw_analysis)
+analysis(t)      = motion(t) + F0₁
+dF/F0(t)         = 100 · (analysis(t) − level) / F0₁ ,   level = mean of the baseline interval
 ```
 
-`median(F_raw_analysis)` is RWD's `median(Ffull)`, defined in the manual as *the median value
-of the full-time raw fluorescence data of interest* — the analysis channel after offset
-subtraction, before any bleaching correction. Keeping the motion-corrected trace on that
-level is what makes dF/F0 divide by the same denominator RWD uses.
+`F0₁` is the analysis channel's F0, its fitting baseline minus the offset, and it is the same
+denominator every other trace uses, so the whole recording is expressed on one declared scale.
+
+RWD divides the same motion-corrected counts by `median(Ffull)`, *the median value of the
+full-time raw fluorescence of interest*. The numerator is identical; only the divisor differs.
+Entering `median(Ffull)` plus the offset as the fitting baseline reproduces RWD's scale exactly
+(`median(Ffull)` is shown in the run details), and any other F0 gives the same curve multiplied
+by `F0 / median(Ffull)`.
 
 The fit is a soft-L1 (`soft_l1`) least-squares line, i.e. RWD's `robust linear fit`; no
 weight has to be supplied, because the slope and the intercept both come from the data.
 
-Validation: on a synthetic recording (300-count event, motion artifact 2.3 × stronger on
-410) the trace agrees with a literal re-implementation of the manual's formula to 0.018 %
-dF/F0 over the whole recording — 0.12 % of the event peak — with the same artifact residual
-and the same noise standard deviation. The robust loss matters: an ordinary least-squares
-slope leaves 0.64 % of the artifact where the robust fit leaves −0.43 %.
+Validation: with the divisor set to `median(Ffull)`, the trace agrees with a literal
+re-implementation of the manual's formula to 0.018 % dF/F0 over a synthetic recording
+(300-count event, motion artifact 2.3 × stronger on 410) — 0.12 % of the event peak — with the
+same artifact residual and the same noise standard deviation. The robust loss matters: an
+ordinary least-squares slope leaves 0.64 % of the artifact where the robust fit leaves −0.43 %.
 
 The axis label and the event-analysis signal list show the fitted slope
 (`RWD motion-corrected 470 (slope=0.5377)`), and the slope, intercept and sample count are
@@ -67,8 +71,12 @@ Only this mode uses the weight field; `rwd` fits its own slope and `ratio` needs
 
 ```
 analysis(t) = C_analysis(t) / C_reference(t)
-dF/F0(t)    = 100 · (analysis(t) − analysis₀) / analysis₀ ,   analysis₀ = F_analysis(t₀) / F_reference(t₀)
+dF/F0(t)    = 100 · (analysis(t) − level) / F0 ,   F0 = F0₁ / F0₂
 ```
+
+Both corrected traces are already on the `raw − offset` scale, so the division happens after
+each channel has had its own background removed. The ratio's own F0 is the ratio of the two
+F0s, which is the level that trace sits on when both baselines are right.
 
 Equivalent to `100 · [(1+a)/(1+b) − 1]` with `a` and `b` the relative deviations of the two
 channels, so it removes a fluctuation proportional to each channel's own level.

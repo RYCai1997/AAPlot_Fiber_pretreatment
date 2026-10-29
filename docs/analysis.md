@@ -27,14 +27,14 @@ Time 0** or **Use Specified Time as 0**), then click **Calculate dF/F0 & Z-score
 and downsampling are off by default; enable them only when needed.
 
 - `F0` is the **fitting baseline minus the offset** of that channel, i.e. the fluorescence the
-  user declared for the trace (`docs/fitting.md`). Without it the mean of the baseline interval
-  would be used.
+  user declared for the trace (`docs/fitting.md`). For a ratio trace it is the ratio of both
+  F0s, `F0₁ / F0₂`, which is the level of that trace after both channels had their offset
+  removed. The interval mean is no longer used as a fallback.
 - dF/F0 is `100 × (F − level) / F0`, where `level` is the mean of the trace in the baseline
   interval. Splitting the two keeps the curve at zero across the baseline while the amplitude is
   expressed relative to the declared F0 — so changing the baseline rescales the response by
   `1 / F0`, and changing the offset moves F0 as well.
 - Z-score uses the dF/F0 mean and sample SD in the same baseline.
-- A ratio trace lives on no count scale, so it keeps the interval mean as F0.
 
 Every corrected wavelength is also normalized separately and retained as
 `dff_<wavelength>_percent` and `zscore_<wavelength>` (for example `dff_560_percent` and
@@ -58,8 +58,8 @@ any subset of those markers, then click **Calculate Event dF/F0 & Z-score**. The
 is 5 s before and 30 s after the marker, with a 5 s pre-marker baseline. Each selected complete
 trial is interpolated to a common time axis and normalized the same way as the full trace: the
 numerator is referenced to that trial's own pre-marker mean, the denominator is the F0 of the
-signal's channel (`fitting baseline − offset`), so a baseline or offset edit moves the event
-results too.
+signal's channel (`fitting baseline − offset`, or `F0₁ / F0₂` for a ratio), so a baseline or
+offset edit moves the event results too.
 Outputs include trial-level and mean ± SEM dF/F0 and Z-score tables and figures, while the JSON
 log records the exact selected marker IDs and times.
 
