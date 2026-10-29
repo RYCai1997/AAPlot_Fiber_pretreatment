@@ -1443,8 +1443,15 @@ def calculate_event_locked_traces(
     post_seconds: float,
     baseline_seconds: float,
     signal_column: str = "analysis_trace",
+    pool_baseline_sd: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
-    """Split a corrected signal around repeated events and normalize each trial independently."""
+    """Split a corrected signal around repeated events and normalize each trial independently.
+
+    ``pool_baseline_sd`` replaces the per-trial noise estimate with one value pooled over the
+    pre-marker windows of every included trial, using the within-trial degrees of freedom. A trial
+    whose own window is noisy then no longer gets a diluted z-score, at the price of assuming the
+    noise is the same in every trial.
+    """
     if signal_column not in processed:
         raise ValueError(f"The corrected signal column '{signal_column}' is unavailable.")
     if pre_seconds <= 0 or post_seconds <= 0:
@@ -1488,6 +1495,7 @@ def calculate_event_locked_traces(
     trial_rows: list[pd.DataFrame] = []
     excluded: list[dict[str, Any]] = []
     trial_arrays: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
+    collected: list[dict[str, Any]] = []
     for event_index, marker_time_min in enumerate(marker_times_min, start=1):
         marker_time_s = float(marker_time_min) * 60.0
         absolute_time = marker_time_s + relative_time
@@ -1513,29 +1521,71 @@ def calculate_event_locked_traces(
         baseline_dff = dff[baseline_mask]
         baseline_center = float(np.mean(baseline_dff))
         baseline_sd = float(np.std(baseline_dff, ddof=1))
-        if not np.isfinite(baseline_sd) or baseline_sd <= np.finfo(float).eps:
+        if not np.isfinite(baseline_sd):
+            excluded.append({
+                "event_index": event_index,
+                "marker_time_min": float(marker_time_min),
+                "reason": "the trial baseline standard deviation is invalid",
+            })
+            continue
+        if not pool_baseline_sd and baseline_sd <= np.finfo(float).eps:
             excluded.append({
                 "event_index": event_index,
                 "marker_time_min": float(marker_time_min),
                 "reason": "the trial baseline standard deviation is zero or invalid",
             })
             continue
-        zscore = (dff - baseline_center) / baseline_sd
+        collected.append({
+            "event_index": event_index,
+            "marker_time_min": float(marker_time_min),
+            "trace": trace,
+            "dff": dff,
+            "center": baseline_center,
+            "own_sd": baseline_sd,
+            "n_baseline": int(baseline_mask.sum()),
+        })
+
+    pooled_sd: float | None = None
+    pooled_dof = 0
+    if pool_baseline_sd and collected:
+        # Textbook pooled within-trial SD: every trial contributes its own sum of squares, so a
+        # trial with a longer window counts for more and no trial is weighted by its variance.
+        pooled_dof = sum(max(0, item["n_baseline"] - 1) for item in collected)
+        if pooled_dof > 0:
+            total = sum(item["own_sd"] ** 2 * max(0, item["n_baseline"] - 1) for item in collected)
+            pooled_sd = float(np.sqrt(total / pooled_dof))
+        if pooled_sd is None or not np.isfinite(pooled_sd):
+            excluded.append({"event_index": 0, "marker_time_min": float("nan"),
+                             "reason": "the pooled baseline standard deviation is invalid"})
+            pooled_sd = None
+
+    for item in collected:
+        sd_used = pooled_sd if (pool_baseline_sd and pooled_sd is not None) else item["own_sd"]
+        if not np.isfinite(sd_used) or sd_used <= np.finfo(float).eps:
+            excluded.append({
+                "event_index": item["event_index"],
+                "marker_time_min": item["marker_time_min"],
+                "reason": "the baseline standard deviation used for the z-score is zero or invalid",
+            })
+            continue
+        zscore = (item["dff"] - item["center"]) / sd_used
         trial_number = len(trial_rows) + 1
         trial_rows.append(pd.DataFrame({
             "trial": trial_number,
-            "source_event_index": event_index,
+            "source_event_index": item["event_index"],
             "marker_name": marker_name,
-            "marker_time_min": float(marker_time_min),
+            "marker_time_min": item["marker_time_min"],
             "relative_time_s": relative_time,
-            "corrected_signal": trace,
-            "dff_percent": dff,
+            "corrected_signal": item["trace"],
+            "dff_percent": item["dff"],
             "zscore": zscore,
             "event_baseline": baseline_mask.astype(int),
-            "f0": f0,
-            "baseline_dff_sd": baseline_sd,
+            "f0": item["trace"][baseline_mask].mean(),
+            "baseline_dff_sd": sd_used,
+            "baseline_dff_sd_own": item["own_sd"],
+            "baseline_dff_n": item["n_baseline"],
         }))
-        trial_arrays.append((trace, dff, zscore))
+        trial_arrays.append((item["trace"], item["dff"], zscore))
 
     if not trial_rows:
         reasons = "; ".join(item["reason"] for item in excluded[:3])
@@ -1577,7 +1627,13 @@ def calculate_event_locked_traces(
         "baseline_seconds": float(baseline_seconds),
         "sample_interval_seconds": sample_interval,
         "signal_column": signal_column,
-        "normalization": "each trial uses its own pre-marker baseline",
+        "baseline_sd_mode": ("one value pooled across trials" if pool_baseline_sd
+                             else "one value per trial"),
+        "pooled_baseline_sd": pooled_sd,
+        "pooled_baseline_dof": int(pooled_dof),
+        "normalization": ("each trial uses its own pre-marker baseline; the z-score divides by one "
+                          "standard deviation pooled across trials" if pool_baseline_sd
+                          else "each trial uses its own pre-marker baseline"),
     }
     return trials, average, details
 

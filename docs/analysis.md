@@ -71,6 +71,21 @@ or offset edit moves the event results through the level it sets.
 Outputs include trial-level and mean ± SEM dF/F0 and Z-score tables and figures, while the JSON
 log records the exact selected marker IDs and times.
 
+The Z-score of a trial divides its dF/F0 by the sample SD (ddof = 1) of the same pre-marker
+window, and the mean of that window is subtracted first — which is zero by construction, because
+F0 is the mean of that window. With **One baseline SD for all trials (pooled)** ticked, one value
+replaces every trial's own:
+
+```
+sd_pooled = sqrt( Σ (nᵢ − 1) sᵢ² / Σ (nᵢ − 1) )
+```
+
+so a trial with a noisier pre-marker window no longer dilutes its own z-score, at the price of
+assuming the noise level is the same in every trial. Each trial row still records both numbers:
+`baseline_dff_sd` is the value actually divided by, `baseline_dff_sd_own` is what that trial's
+window gave, and `baseline_dff_n` its sample count. Toggling the box recalculates the event
+analysis immediately and the status line names the pooled value.
+
 Event CSV files are grouped by marker name: one file per analyzed marker, with the shared
 relative time axis in the first column, one `dF/F0_trialNN` column per trial, one empty
 separator column, then the matching `Z-score_trialNN` columns. When several signals are

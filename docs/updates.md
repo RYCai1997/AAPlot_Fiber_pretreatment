@@ -5,6 +5,13 @@ manual.
 
 ## 2026-10-29
 
+- Event analysis can pool the baseline noise: **One baseline SD for all trials (pooled)**
+  replaces each trial's own SD with `sqrt(Σ(nᵢ−1)sᵢ²/Σ(nᵢ−1))`. Per trial is still the default,
+  so existing z-scores do not move. Every trial row now records `baseline_dff_sd` (the value
+  divided by), `baseline_dff_sd_own` (that trial's own) and `baseline_dff_n`, and the toggle
+  recalculates at once. On a five-trial recording where one pre-marker window was 2.6× noisier
+  than the others, the pooled SD came out at 0.1133 % against 0.2009 / 0.0786 / 0.0792 / 0.0754 /
+  0.0757 % per trial.
 - Added a **`none`** fitting model: the offset is removed and nothing else, so `corrected =
   raw − offset`. It needs no fitting regions and is accepted by **Apply Correction** straight
   away.

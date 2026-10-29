@@ -74,6 +74,7 @@ trials, and **Export Results** to write the folder.
 | PLS `beta` | 8, allowed 5–12 | Configure Fit |
 | Smoothing / downsampling | off | Full trace analysis |
 | Event window | 5 s before, 30 s after, 5 s baseline | Event Analysis |
+| Event Z-score SD | one per trial (pooled across trials optional) | Event Analysis |
 | Estimate exclusion window | 5 s before, 60 s after each marker | Data & Fitting |
 | Time units | per field (`s` for windows, `min` for ranges), switchable | every time field |
 

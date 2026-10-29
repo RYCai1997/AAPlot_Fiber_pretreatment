@@ -1069,10 +1069,17 @@ class PretreatmentApp:
         row = self.add_time_entry(event_tab, row, "Trace Before Marker", "event_pre_seconds")
         row = self.add_time_entry(event_tab, row, "Trace After Marker", "event_post_seconds")
         row = self.add_time_entry(event_tab, row, "Baseline Before Marker", "event_baseline_seconds")
+        self.event_pool_sd_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(event_tab, text="One baseline SD for all trials (pooled)",
+                        variable=self.event_pool_sd_var,
+                        command=self.event_pool_sd_changed).grid(
+                            row=row, column=0, columnspan=2, sticky="w"); row += 1
         ttk.Label(
             event_tab,
             text="Select any number of markers with Ctrl/Shift-click (all are selected by default). "
-                 "Each selected trial is normalized using its own interval immediately before time 0.",
+                 "Each selected trial is normalized using its own interval immediately before time 0. "
+                 "The z-score divides by that trial's own SD; tick the box to pool the pre-marker "
+                 "windows into one SD instead, which stops a noisy trial from diluting its own z.",
             wraplength=380, style="Hint.TLabel",
         ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(5, 8)); row += 1
         ttk.Button(
@@ -1851,6 +1858,17 @@ class PretreatmentApp:
             "The bleaching fit exclusions changed. Click Apply Correction to refit the baseline "
             "with the marker windows kept out (or without them)."
         )
+
+    def event_pool_sd_changed(self) -> None:
+        """Recalculate the event analysis so the toggle takes effect at once."""
+        if self.event_average is None:
+            self.vars["event_status"].set(
+                "The z-score will use "
+                + ("one pooled baseline SD." if self.event_pool_sd_var.get()
+                   else "each trial's own baseline SD.")
+            )
+            return
+        self.calculate_event_analysis(allow_refresh=False)
 
     def markers_for_reference_check(self) -> tuple[float, ...]:
         """Event times the reference check should look at: the selected ones, else all."""
@@ -3775,6 +3793,7 @@ class PretreatmentApp:
                     post_seconds,
                     baseline_seconds,
                     signal_column="event_signal",
+                    pool_baseline_sd=bool(self.event_pool_sd_var.get()),
                 )
                 trials.insert(0, "event_signal_label", signal["label"])
                 trials.insert(0, "event_signal_key", signal["key"])
@@ -3815,7 +3834,15 @@ class PretreatmentApp:
                 "selected_signal_keys": list(selected_signal_keys),
                 "selected_signals": [dict(signal) for signal in selected_signals],
                 "signal_details": signal_details,
-                "normalization": "each signal trial uses its own pre-marker baseline",
+                "baseline_sd_mode": ("one value pooled across trials"
+                                     if self.event_pool_sd_var.get() else "one value per trial"),
+                "pooled_baseline_sd": next(
+                    (item["pooled_baseline_sd"] for item in signal_details.values()
+                     if item.get("pooled_baseline_sd") is not None), None),
+                "normalization": ("each signal trial uses its own pre-marker baseline; the z-score "
+                                  "divides by one standard deviation pooled across trials"
+                                  if self.event_pool_sd_var.get()
+                                  else "each signal trial uses its own pre-marker baseline"),
             }
             self.event_trials = pd.concat(trial_frames, ignore_index=True)
             self.event_average = pd.concat(average_frames, ignore_index=True)
@@ -3823,10 +3850,16 @@ class PretreatmentApp:
             self.event_view_active = True
             self.draw_event_analysis()
             excluded_count = len(event_details["excluded_events"])
+            sd_note = ""
+            if self.event_pool_sd_var.get():
+                pooled = event_details.get("pooled_baseline_sd")
+                sd_note = (f" z uses one pooled baseline SD ({pooled:.4g} %)." if pooled is not None
+                           else " z uses one pooled baseline SD.")
             self.vars["event_status"].set(
                 f"Calculated {len(marker_times)} selected marker(s) × {len(selected_signals)} signal(s) "
                 f"for '{marker_name}' ({event_details['included_trials']} included traces)"
                 + (f"; excluded {excluded_count} incomplete/invalid trace(s)." if excluded_count else ".")
+                + sd_note
             )
             self.vars["status"].set(self.vars["event_status"].get())
         except Exception as exc:
