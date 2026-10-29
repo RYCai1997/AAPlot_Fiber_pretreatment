@@ -722,6 +722,265 @@ def estimate_reference_weight(
     return relative_weight * matched
 
 
+def _robust_line(x: np.ndarray, y: np.ndarray, keep: np.ndarray) -> tuple[float, float, int]:
+    """Soft-L1 straight-line fit of ``y`` on ``x`` over the samples selected by ``keep``."""
+    xx, yy = np.asarray(x, float)[keep], np.asarray(y, float)[keep]
+    used = int(keep.sum())
+    if used < 50:
+        raise ValueError("Fewer than 50 samples are available for the reference fit.")
+    if float(np.ptp(xx)) <= 0:
+        raise ValueError("The reference channel does not vary, so its weight cannot be fitted.")
+    design = np.column_stack((xx, np.ones_like(xx)))
+    start = np.linalg.lstsq(design, yy, rcond=None)[0]
+    scale = float(np.median(np.abs(np.diff(yy)))) or float(np.std(yy)) or 1.0
+    result = least_squares(lambda parameters: design @ parameters - yy, start,
+                           loss="soft_l1", f_scale=scale)
+    return float(result.x[0]), float(result.x[1]), used
+
+
+def reference_check(
+    primary: np.ndarray,
+    reference: np.ndarray,
+    time_min: np.ndarray,
+    marker_times_min: tuple[float, ...] = (),
+    window_seconds: float = 30.0,
+    baseline_seconds: float = 10.0,
+    primary_label: str = "470",
+    reference_label: str = "410",
+) -> dict[str, Any]:
+    """Describe how the reference channel behaves during the events of one recording.
+
+    A reference only helps the event amplitude when it moves the *same* way as the analysis
+    channel there and by an amount that follows it. When it moves against the signal, or by
+    an amount that does not track it, no linear combination can separate the two: a positive
+    weight mixes that excursion in, a negative one subtracts the response. The numbers here
+    say which case a recording is in, before a lot of parameters are tried.
+
+    Everything is returned as plain floats and ints so it can be written to the saved JSON.
+    """
+    a = np.asarray(primary, float)
+    b = np.asarray(reference, float)
+    t = np.asarray(time_min, float)
+    finite = np.isfinite(a) & np.isfinite(b) & np.isfinite(t)
+    if finite.sum() < 50:
+        raise ValueError("Fewer than 50 samples are available to check the reference.")
+    level_a = float(np.nanmedian(a[finite]))
+    level_b = float(np.nanmedian(b[finite]))
+    if np.isclose(level_a, 0.0) or np.isclose(level_b, 0.0):
+        raise ValueError("One of the channels has a level of zero, so relative deflections "
+                         "cannot be formed.")
+    markers = sorted({float(value) for value in marker_times_min})
+    # A marker written twice (state 0 and state 1 at the same instant) and two markers closer
+    # together than the response window describe one event; counting both would measure the
+    # same trace twice and drag the ratios towards the noise of a single window.
+    spacing = float(window_seconds) / 60.0
+    collapsed: list[float] = []
+    for marker in markers:
+        if collapsed and marker - collapsed[-1] < spacing:
+            continue
+        collapsed.append(marker)
+    markers = collapsed
+
+    quiet = finite.copy()
+    pre_window = 5.0 / 60.0
+    for marker in markers:
+        quiet &= ~((t >= marker - pre_window) & (t <= marker + window_seconds / 60.0))
+
+    def pearson(keep: np.ndarray) -> float | None:
+        if keep.sum() < 20:
+            return None
+        xa = a[keep] - float(np.mean(a[keep]))
+        xb = b[keep] - float(np.mean(b[keep]))
+        denominator = float(np.sqrt(np.sum(xa * xa) * np.sum(xb * xb)))
+        if denominator <= 0:
+            return None
+        return float(np.sum(xa * xb) / denominator)
+
+    slope_all, intercept_all, samples_all = _robust_line(b, a, finite)
+    try:
+        slope_quiet, intercept_quiet, samples_quiet = _robust_line(b, a, quiet)
+    except ValueError:
+        slope_quiet, intercept_quiet, samples_quiet = slope_all, intercept_all, samples_all
+    level_matched = level_a / level_b if not np.isclose(level_b, 0.0) else float("nan")
+
+    # Every event is resampled onto one relative-time grid so the preview below is the peak of
+    # the trial mean, which is what the event analysis reports, not the mean of the per-event
+    # peaks (those are always larger).
+    grid = np.linspace(0.0, float(window_seconds), 201)
+    primary_curves: list[np.ndarray] = []
+    reference_curves: list[np.ndarray] = []
+    events: list[dict[str, Any]] = []
+    for index, marker in enumerate(markers, start=1):
+        base = (t >= marker - baseline_seconds / 60.0) & (t < marker) & finite
+        response = (t >= marker) & (t <= marker + window_seconds / 60.0) & finite
+        if base.sum() < 5 or response.sum() < 5:
+            continue
+        a_base = float(np.mean(a[base]))
+        b_base = float(np.mean(b[base]))
+        if np.isclose(a_base, 0.0) or np.isclose(b_base, 0.0):
+            continue
+        relative_time = (t[response] - marker) * 60.0
+        curve_a = 100.0 * (np.interp(grid, relative_time, a[response]) - a_base) / a_base
+        curve_b = 100.0 * (np.interp(grid, relative_time, b[response]) - b_base) / b_base
+        primary_curves.append(curve_a)
+        reference_curves.append(curve_b)
+        d_a = float(curve_a[int(np.argmax(np.abs(curve_a)))])
+        d_b = float(curve_b[int(np.argmax(np.abs(curve_b)))])
+        events.append({
+            "event": int(index),
+            "time_min": round(float(marker), 6),
+            "primary_percent": round(d_a, 4),
+            "reference_percent": round(d_b, 4),
+            "in_phase": bool(d_a * d_b > 0),
+            "ratio": round(d_b / d_a, 4) if abs(d_a) > 1e-6 else None,
+        })
+
+    in_phase_count = sum(1 for event in events if event["in_phase"])
+    anti_phase_count = len(events) - in_phase_count
+    ratios = [event["ratio"] for event in events if event["ratio"] is not None]
+    ratio_mean = float(np.mean(ratios)) if ratios else None
+    ratio_sd = float(np.std(ratios)) if len(ratios) > 1 else None
+    ratio_cv = (abs(ratio_sd / ratio_mean) if ratio_mean and ratio_sd is not None else None)
+
+    # A reference that mirrors the signal scales with it, so |signal| and |reference| rise and
+    # fall together across events. One that carries its own event-locked artifact has a roughly
+    # constant excursion while the response varies. The two are told apart here because the
+    # advice is opposite: a mirror is a calibration problem, an independent artifact means the
+    # reference cannot stand in for the response at all.
+    reference_cv = None
+    signal_cv = None
+    amplitude_correlation = None
+    if len(events) >= 3:
+        size_a = np.abs([event["primary_percent"] for event in events])
+        size_b = np.abs([event["reference_percent"] for event in events])
+        if float(np.mean(size_a)) > 0:
+            signal_cv = float(np.std(size_a) / np.mean(size_a))
+        if float(np.mean(size_b)) > 0:
+            reference_cv = float(np.std(size_b) / np.mean(size_b))
+        if float(np.std(size_a)) > 0 and float(np.std(size_b)) > 0:
+            amplitude_correlation = float(np.corrcoef(size_a, size_b)[0, 1])
+
+    mean_primary = np.mean(np.vstack(primary_curves), axis=0) if primary_curves else None
+    mean_reference = np.mean(np.vstack(reference_curves), axis=0) if reference_curves else None
+
+    def predict(weight: float) -> dict[str, float] | None:
+        """Peak of the trial mean the difference combination would give at this weight."""
+        if mean_primary is None or mean_reference is None:
+            return None
+        factor = weight * level_b / level_a
+        combined = mean_primary - factor * mean_reference
+        peak = float(combined[int(np.argmax(np.abs(combined)))])
+        return {
+            "weight": float(weight),
+            "mean_percent": peak,
+            "min_percent": float(np.min(combined)),
+            "max_percent": float(np.max(combined)),
+        }
+
+    candidates = [
+        predict(0.0),
+        predict(slope_quiet),
+        predict(slope_all),
+        predict(level_matched),
+    ]
+    candidates = [value for value in candidates if value is not None]
+
+    if not events:
+        verdict = "no_events"
+        summary = ("No complete event window is available, so the reference cannot be judged "
+                   "against the responses. Load a marker file or widen the window.")
+    elif anti_phase_count >= 0.6 * len(events):
+        mirrors = (amplitude_correlation is not None and amplitude_correlation >= 0.60
+                   and ratio_cv is not None and ratio_cv < 0.50)
+        if mirrors:
+            verdict = "anti_phase_proportional"
+            summary = (
+                f"{reference_label} moves against {primary_label} and its size follows the "
+                f"response (ratio {ratio_mean:+.2f} ± {ratio_sd:.2f}, amplitude correlation "
+                f"{amplitude_correlation:+.2f}). A reference that mirrors the signal like that "
+                "usually means bleed-through that was over-subtracted in the acquisition "
+                "software: the 'isosbestic' channel already contains the response with the "
+                "opposite sign, so it is not an independent measurement. Subtracting it adds the "
+                "response back (positive weight) or cancels it (negative one), and no weight can "
+                "separate the two. Report the analysis channel on its own and check the "
+                f"{reference_label} bleed-through calibration."
+            )
+        else:
+            verdict = "anti_phase_independent"
+            size = ""
+            if reference_cv is not None and signal_cv is not None:
+                size = (f" The {reference_label} excursion varies by {reference_cv * 100:.0f}% of "
+                        f"its own mean while the {primary_label} response varies by "
+                        f"{signal_cv * 100:.0f}%")
+                if amplitude_correlation is not None:
+                    size += f", and the two do not grow together (r = {amplitude_correlation:+.2f})"
+                size += "."
+            summary = (
+                f"{reference_label} moves against {primary_label} during {anti_phase_count} of "
+                f"{len(events)} events, but by an amount that does not follow the response."
+                f"{size} That is the signature of an event-locked artifact on the reference "
+                "channel itself - movement, blood volume, a cable - and not of a scaled copy of "
+                "the signal. No linear combination can separate the two: a positive weight mixes "
+                "the artifact into the response and a negative one removes the response. For "
+                "these events report the analysis channel alone (Reference = None) and keep the "
+                "reference for drift control."
+            )
+    elif in_phase_count >= 0.6 * len(events):
+        verdict = "in_phase"
+        share = (slope_quiet * level_b / level_a * ratio_mean) if ratio_mean is not None else None
+        if share is None:
+            summary = (
+                f"{primary_label} and {reference_label} move the same way during {in_phase_count} "
+                f"of {len(events)} events, which is what a shared artifact looks like. The preview "
+                "below shows what each weight leaves of the response."
+            )
+        else:
+            summary = (
+                f"{primary_label} and {reference_label} move the same way during {in_phase_count} "
+                f"of {len(events)} events, which is what a shared artifact looks like. The fitted "
+                f"slope turns the reference excursion into {share:.0%} of the response, so "
+                "correcting takes that share away: right if it is movement, wrong if the reference "
+                "carries a real response. The preview below shows what each weight leaves."
+            )
+    else:
+        verdict = "mixed"
+        summary = (
+            f"The polarity is inconsistent: {in_phase_count} event(s) in phase, "
+            f"{anti_phase_count} against. The mean is dominated by artifacts of both signs; "
+            "check the individual events before trusting the average."
+        )
+
+    return {
+        "primary_label": primary_label,
+        "reference_label": reference_label,
+        "levels": {"primary": level_a, "reference": level_b},
+        "level_matched_weight": float(level_matched),
+        "slope_all_samples": slope_all,
+        "slope_quiet_samples": slope_quiet,
+        "intercept_all_samples": intercept_all,
+        "intercept_quiet_samples": intercept_quiet,
+        "samples_all": samples_all,
+        "samples_quiet": samples_quiet,
+        "pearson_all": pearson(finite),
+        "pearson_quiet": pearson(quiet),
+        "events_checked": len(events),
+        "events_in_phase": in_phase_count,
+        "events_anti_phase": anti_phase_count,
+        "ratio_mean": ratio_mean,
+        "ratio_sd": ratio_sd,
+        "ratio_cv": ratio_cv,
+        "signal_size_cv": signal_cv,
+        "reference_size_cv": reference_cv,
+        "amplitude_correlation": amplitude_correlation,
+        "events": events,
+        "amplitude_preview": candidates,
+        "verdict": verdict,
+        "summary": summary,
+        "window_seconds": float(window_seconds),
+        "baseline_seconds": float(baseline_seconds),
+    }
+
+
 def effective_baseline(
     baseline: float | None,
     offset: float | None,

@@ -186,3 +186,46 @@ w = estimate_reference_weight(corrected_470, corrected_410, mask, level_470, lev
 
 `mask` selects the samples to fit on and both levels are the per-channel `correction_scale`
 values.
+
+## When the reference moves against the signal
+
+A reference is only useful for the event amplitude if it behaves like a *shared artifact*:
+same direction, size not tied to the response. Plenty of recordings do the opposite — 470 rises
+during the event while 410 falls — and then no weight can rescue the amplitude, because a
+positive weight mixes the reference excursion into the response and a negative one removes the
+response.
+
+**Check Reference Polarity** (Data & Fitting) measures this on the applied correction and says
+which case the recording is in. It reports, for the event window set in the event analysis:
+
+| Quantity | What it tells you |
+| --- | --- |
+| Pearson `r` overall and outside the events | how much of the two traces moves together |
+| slope overall and outside the events | the weight the artifact actually implies, with and without the responses contributing |
+| `signal CV` / `reference CV` | how much the response and the reference excursion vary across events |
+| amplitude correlation | whether the reference excursion grows with the response |
+| per-event table | `470` peak, `410` peak, polarity, `ref / signal` ratio |
+| preview table | the event peak each candidate weight would produce |
+
+Three verdicts:
+
+- **`in_phase`** — both channels move together, so the fit is doing what it is meant to do. The
+  summary states what share of the response the fitted slope removes: right if that is movement,
+  wrong if the reference carries a real response.
+- **`anti_phase_proportional`** — 410 moves against 470 *and* its size follows the response
+  (amplitude correlation ≥ 0.6, ratio spread < 50 %). That is what bleed-through
+  over-subtraction in the acquisition software looks like: the "isosbestic" channel already
+  contains the response with the opposite sign, so it is not an independent measurement. Report
+  the analysis channel alone and check the 410 calibration.
+- **`anti_phase_independent`** — 410 moves against 470 but by a nearly constant excursion
+  (reference CV far below signal CV, no correlation with the response). That is an
+  event-locked artifact on the reference itself — movement, blood volume, a cable — and it
+  cannot be separated from the response by any linear combination.
+
+Two buttons act on the verdict: **Use The Analysis Channel Alone (weight 0)** switches to
+`difference` with a zero weight, so `rwd` mode becomes "no reference at all" without unlinking
+the wavelength, and **Use The Quiet-Window Slope** writes the slope fitted outside the events
+into the Reference Weight field. Markers written twice at the same instant, or closer together
+than the response window, are collapsed to one event.
+
+The full report is stored in the export as `fit_details.reference_check`.

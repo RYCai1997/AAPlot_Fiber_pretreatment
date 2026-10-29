@@ -104,6 +104,7 @@ the exact file list.
 | Apply does nothing / asks to confirm regions | A data-range, model or baseline-mode change invalidates that channel's confirmed fit. Offset and baseline edits do not. |
 | Event results vanish after changing the combination | Trials are computed from the stored combination trace; they are recomputed on the next apply, and cleared if the combination itself changed. |
 | A single-wavelength recording | Set **Reference Wavelength** to `None`; the combination is skipped and the corrected channel is analysed on its own. |
+| 470 and 410 move in opposite directions during events, and no weight gives a bigger response | Click **Check Reference Polarity**. If 410 carries its own event-locked artifact, or mirrors the signal, no linear combination can recover more: report the analysis channel alone (the window offers that as one button) — see `docs/channels.md`. |
 | `The fitting baseline for 470 (...) must be larger than the offset` | The baseline is the **raw** level, offset included; F0 = baseline − offset has to stay positive. Enter the level you read off the raw trace, or correct the offset. |
 | dF/F0 comes out about twice too large or too small | Check that the **Fitting Baseline** is the raw level of the trace minimum and not an already-subtracted one: F0 is the denominator, so a wrong baseline scales every dF/F0 by the same factor. |
 

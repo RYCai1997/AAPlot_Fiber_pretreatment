@@ -5,6 +5,21 @@ manual.
 
 ## 2026-10-29
 
+- Added **Check Reference Polarity** (Data & Fitting): one pass over the applied correction that
+  reports how the reference channel behaves during the events — Pearson correlation overall and
+  outside the events, the motion slope fitted with and without the responses, the spread of the
+  response and of the reference excursion across events, the per-event polarity and
+  `reference / signal` ratio, and the event peak each candidate weight would produce. It ends in
+  one of three verdicts: `in_phase` (the reference behaves like a shared artifact),
+  `anti_phase_proportional` (it mirrors the signal, which is bleed-through over-subtraction) or
+  `anti_phase_independent` (it carries its own event-locked artifact). This answers, per
+  recording, why a corrected response cannot be made larger by tuning parameters: when the
+  reference moves against the signal, a positive weight mixes the reference excursion into the
+  response and a negative one removes the response.
+- The window can apply its own finding: **Use The Analysis Channel Alone (weight 0)** or **Use
+  The Quiet-Window Slope**, the slope fitted outside the event windows. Duplicate markers and
+  markers closer together than the response window are collapsed to one event. The report is
+  written to `fit_details.reference_check`.
 - **dF/F0 divides by a measured F0 again**: the mean of the corrected trace inside the chosen
   baseline window, per trace, and the Z-score is the same dF/F0 divided by its standard
   deviation over that window. An earlier attempt in this session used the typed

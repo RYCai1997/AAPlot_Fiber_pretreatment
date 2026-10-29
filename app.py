@@ -109,6 +109,7 @@ from processing import (
     SAVED_ANALYSIS_FILE,
     load_recording,
     process_data,
+    reference_check,
     region_mask,
     rwd_motion_corrected,
     rwd_motion_label,
@@ -891,6 +892,11 @@ class PretreatmentApp:
                                  "outside the exclusion windows below. The RWD combination always "
                                  "fits its own slope and intercept and ignores this field.",
                   wraplength=350, justify="left").grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 6)); row += 1
+        self.check_reference_button = ttk.Button(
+            data_tab, text="Check Reference Polarity", command=self.check_reference_clicked,
+            state="disabled")
+        self.check_reference_button.grid(row=row, column=0, columnspan=2, sticky="ew",
+                                        pady=(0, 6)); row += 1
         row = self.add_time_entry(data_tab, row, "Exclude Before Marker", "estimate_exclude_before")
         row = self.add_time_entry(data_tab, row, "Exclude After Marker", "estimate_exclude_after")
         ttk.Label(data_tab, text="Every marker is excluded on both sides before the weight is "
@@ -1715,6 +1721,10 @@ class PretreatmentApp:
             ready = (difference and has_reference and self.processed is not None
                      and bool((self.details or {}).get("fit_parameters")))
             self.estimate_weight_button.configure(state="normal" if ready else "disabled")
+        if hasattr(self, "check_reference_button"):
+            checkable = (has_reference and self.processed is not None
+                         and bool((self.details or {}).get("fit_parameters")))
+            self.check_reference_button.configure(state="normal" if checkable else "disabled")
 
     def estimate_reference_weight_clicked(self) -> None:
         """Fit the reference weight on everything except the marker windows."""
@@ -1774,6 +1784,160 @@ class PretreatmentApp:
             f"{len(self.markers)} exclusion window(s) ({pre:g} s before, {post:g} s after each "
             f"marker); matched scale is {matched:.4g}.{note}"
         )
+
+    def markers_for_reference_check(self) -> tuple[float, ...]:
+        """Event times the reference check should look at: the selected ones, else all."""
+        selected = self.selected_event_markers()
+        chosen = selected or list(self.markers)
+        return tuple(float(marker["time_min"]) for marker in chosen)
+
+    def check_reference_clicked(self) -> None:
+        """Measure how the reference channel behaves during the events of this recording."""
+        from tkinter import messagebox
+        if self.refresh_with_current_settings(self.check_reference_clicked, "the reference check"):
+            return
+        primary = self.analysis_wavelength_var.get()
+        reference = self.reference_wavelength_var.get()
+        if reference in {"", "None"}:
+            messagebox.showinfo(
+                "No Reference Selected",
+                "Pick a reference wavelength in Data & Fitting to check how it behaves during the "
+                "events.",
+            )
+            return
+        if (self.processed is None or self.details is None
+                or f"corrected_{primary}" not in self.processed
+                or f"corrected_{reference}" not in self.processed):
+            messagebox.showinfo(
+                "Apply Correction First",
+                "The corrected traces of both channels are needed. Set the reference wavelength and "
+                "click Apply Correction.",
+            )
+            return
+        window = self.parsed_number("event_post_seconds", 30.0) or 30.0
+        baseline = self.parsed_number("event_baseline_seconds", 5.0) or 5.0
+        try:
+            report = reference_check(
+                self.processed[f"corrected_{primary}"].to_numpy(float),
+                self.processed[f"corrected_{reference}"].to_numpy(float),
+                self.processed["time_min"].to_numpy(float),
+                self.markers_for_reference_check(),
+                float(window),
+                float(baseline),
+                primary,
+                reference,
+            )
+        except Exception as exc:  # noqa: BLE001 - reported instead of a traceback
+            messagebox.showerror("Reference Check Failed", str(exc))
+            return
+        self.details["reference_check"] = {
+            **report,
+            "analysis_wavelength": primary,
+            "reference_wavelength": reference,
+            "combine": self.vars["combine"].get(),
+        }
+        head = report["summary"].split(". ")[0]
+        self.vars["status"].set(f"Reference check ({report['verdict'].replace('_', ' ')}): {head}.")
+        self.show_reference_check(report)
+
+    def show_reference_check(self, report: dict[str, Any]) -> None:
+        """Window with the per-event polarity and what each weight would have produced."""
+        import tkinter as tk
+        from tkinter import ttk
+        window = tk.Toplevel(self.root)
+        window.title(f"Reference Check: {report['primary_label']} vs {report['reference_label']}")
+        window.geometry("1000x700")
+        window.minsize(780, 560)
+        window.transient(self.root)
+        frame = ttk.Frame(window, padding=10)
+        frame.pack(fill="both", expand=True)
+        frame.columnconfigure(0, weight=1)
+
+        def percent(value: Any) -> str:
+            return "n/a" if value is None else f"{float(value):+.3f}%"
+
+        def number(value: Any, digits: int = 4) -> str:
+            return "n/a" if value is None else f"{float(value):.{digits}g}"
+
+        caption = (f"{report['events_checked']} event(s) · polarity {report['events_in_phase']} in "
+                   f"phase / {report['events_anti_phase']} against · "
+                   f"r {number(report['pearson_all'], 3)} overall, "
+                   f"{number(report['pearson_quiet'], 3)} outside the events · "
+                   f"slope {number(report['slope_all_samples'])} overall, "
+                   f"{number(report['slope_quiet_samples'])} outside the events · "
+                   f"level matched {number(report['level_matched_weight'])}")
+        ttk.Label(frame, text=caption, wraplength=940, justify="left").grid(
+            row=0, column=0, sticky="w")
+        ttk.Label(frame, text=report["summary"], wraplength=940, justify="left",
+                  font=("Segoe UI", 9)).grid(row=1, column=0, sticky="w", pady=(6, 8))
+
+        events_frame = ttk.Frame(frame)
+        events_frame.grid(row=2, column=0, sticky="ew", pady=(0, 2))
+        ttk.Label(events_frame, text="Measurements per event").pack(anchor="w")
+        events = ttk.Treeview(frame, columns=("event", "time", "primary", "reference", "polarity", "ratio"),
+                              show="headings", height=min(10, max(3, report["events_checked"])))
+        for name, label, width, align in (("event", "Event", 60, "w"), ("time", "Marker (min)", 110, "w"),
+                                          ("primary", f"{report['primary_label']} peak", 120, "e"),
+                                          ("reference", f"{report['reference_label']} peak", 120, "e"),
+                                          ("polarity", "Polarity", 110, "w"),
+                                          ("ratio", "ref / signal", 110, "e")):
+            events.heading(name, text=label)
+            events.column(name, width=width, anchor=align)
+        for item in report.get("events", []):
+            events.insert("", "end", values=(
+                item["event"], f"{item['time_min']:.3f}", percent(item["primary_percent"]),
+                percent(item["reference_percent"]),
+                "in phase" if item["in_phase"] else "against",
+                "n/a" if item["ratio"] is None else f"{item['ratio']:+.2f}",
+            ))
+        events.grid(row=3, column=0, sticky="ew")
+
+        ttk.Label(
+            frame,
+            text="Event amplitude the difference combination would give (peak of the trial mean, "
+                 "so it is comparable with the event analysis):",
+            wraplength=940, justify="left").grid(row=4, column=0, sticky="w", pady=(10, 2))
+        weights = ttk.Treeview(frame, columns=("choice", "weight", "peak"), show="headings", height=4)
+        for name, label, width, align in (("choice", "Combination", 320, "w"),
+                                         ("weight", "Weight", 120, "e"),
+                                         ("peak", "Predicted event peak", 160, "e")):
+            weights.heading(name, text=label)
+            weights.column(name, width=width, anchor=align)
+        choices = ("analysis channel alone", "quiet-window slope", "all-sample slope", "level matched")
+        for index, candidate in enumerate(report.get("amplitude_preview") or []):
+            weights.insert("", "end", values=(
+                choices[index] if index < len(choices) else "other",
+                f"{candidate['weight']:.4g}",
+                f"{candidate['mean_percent']:+.3f}%",
+            ))
+        weights.grid(row=5, column=0, sticky="ew")
+
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=6, column=0, sticky="ew", pady=(10, 0))
+        quiet_slope = float(report["slope_quiet_samples"])
+        ttk.Button(
+            buttons, text="Use The Analysis Channel Alone (weight 0)",
+            command=lambda: (window.destroy(), self.adopt_reference_weight(0.0)),
+        ).pack(side="left")
+        ttk.Button(
+            buttons, text=f"Use The Quiet-Window Slope ({quiet_slope:.4g})",
+            command=lambda: (window.destroy(), self.adopt_reference_weight(quiet_slope)),
+        ).pack(side="left", padx=6)
+        ttk.Button(buttons, text="Close", command=window.destroy).pack(side="right")
+
+    def adopt_reference_weight(self, weight: float) -> None:
+        """Apply a reference weight from the reference check window."""
+        from tkinter import messagebox
+        if not math.isfinite(weight):
+            messagebox.showinfo(
+                "No Usable Weight",
+                "The reference weight taken from this recording is not a finite number.",
+            )
+            return
+        self.vars["combine"].set("difference")
+        self.vars["reference_weight"].set(f"{weight:.6g}")
+        self.sync_reference_weight_state()
+        self.apply_processing()
 
     def parsed_number(self, key: str, default: Any = None) -> Any:
         text = self.vars[key].get().strip()
@@ -2152,9 +2316,9 @@ class PretreatmentApp:
         motion_fit = None
         try:
             if mode == "rwd":
-                raw_column = f"offset_adjusted_{primary}"
-                raw_level = (float(np.nanmedian(self.processed[raw_column].to_numpy(float)))
-                             if raw_column in self.processed else None)
+                recorded = parameters.get(primary) or {}
+                raw_level = (float(recorded["effective_baseline"])
+                             if recorded.get("effective_baseline") is not None else None)
                 combined, analysis_reference, slope, intercept, used = rwd_motion_corrected(
                     self.processed[f"corrected_{primary}"].to_numpy(float),
                     self.processed[f"corrected_{reference}"].to_numpy(float),
@@ -2194,6 +2358,7 @@ class PretreatmentApp:
             self.details["reference_weight"] = (None if mode == "ratio" else _weight)
             self.details["analysis_reference_from_user_baselines"] = float(analysis_reference)
             self.details["rwd_motion_fit"] = motion_fit
+            self.details["reference_check"] = None
             self.details["normalization"] = None
         self.refresh_event_signal_list()
         self.rebuild_axes()
