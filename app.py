@@ -18,6 +18,49 @@ from typing import Any, Callable
 import numpy as np
 import pandas as pd
 
+ERROR_LOG_NAME = "aaplot_errors.log"
+# Lengths of series that had to be trimmed before plotting, newest last.
+PLOT_MISMATCHES: list[tuple[int, ...]] = []
+
+
+def record_error(text: str) -> Path | None:
+    """Append one traceback to a log beside the app so it can be reported."""
+    path = Path(__file__).with_name(ERROR_LOG_NAME)
+    try:
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}]\n{text.rstrip()}\n\n")
+        return path
+    except Exception:  # noqa: BLE001 - logging must never mask the original error
+        return None
+
+
+def install_callback_logger(root: Any) -> None:
+    """Keep the full traceback of an exception raised inside a Tk callback."""
+    def handler(exc: Any, value: Any, tb: Any) -> None:
+        import traceback
+        text = "".join(traceback.format_exception(exc, value, tb))
+        print(text, file=sys.stderr)
+        path = record_error(text)
+        if path is not None:
+            print(f"[traceback saved to {path}]", file=sys.stderr)
+    root.report_callback_exception = handler
+
+
+def aligned_arrays(*arrays: Any) -> list[np.ndarray]:
+    """Cast to 1-D float arrays, trimmed to the shortest input.
+
+    Matplotlib refuses to plot series of different lengths, so one dropped sample
+    turns a redraw into a crash. Trimming keeps the plot usable and the mismatch is
+    recorded instead of hidden.
+    """
+    prepared = [np.asarray(array, float).ravel() for array in arrays]
+    sizes = tuple(item.size for item in prepared)
+    shortest = min(sizes)
+    if len(set(sizes)) > 1:
+        PLOT_MISMATCHES.append(sizes)
+    return [item[:shortest] for item in prepared]
+
+
 from processing import (
     ProcessingCancelled,
     ProcessingConfig,
@@ -262,10 +305,12 @@ class FitWindow:
             self.fitted_preview = np.asarray(fitted, dtype=float)
         self.ax.clear()
         color = WAVELENGTH_COLORS.get(self.channel, ("#666666", "#333333"))[0]
-        self.ax.plot(self.time_min, self.values, color=color, lw=float(self.signal_width_var.get()),
+        signal_x, signal_y = aligned_arrays(self.time_min, self.values)
+        self.ax.plot(signal_x, signal_y, color=color, lw=float(self.signal_width_var.get()),
                      label=f"{self.channel} after offset", gid="signal")
         if self.fitted_preview is not None:
-            self.ax.plot(self.time_min, self.fitted_preview, color="#D62728", ls="--",
+            fit_x, fit_y = aligned_arrays(self.time_min, self.fitted_preview)
+            self.ax.plot(fit_x, fit_y, color="#D62728", ls="--",
                          lw=float(self.fit_width_var.get()), label="fit", gid="fit")
         self.region_patches = []
         for index, (start, end) in enumerate(self.regions):
@@ -277,8 +322,10 @@ class FitWindow:
         if selected_indices.size:
             step = max(1, -(-selected_indices.size // 6000))
             shown = selected_indices[::step]
-            self.ax.scatter(self.time_min[shown], self.values[shown], s=2.0,
-                            color="#222222", alpha=0.35, label="samples used in fit")
+            shown = shown[shown < min(len(self.time_min), len(self.values))]
+            if shown.size:
+                self.ax.scatter(self.time_min[shown], self.values[shown], s=2.0,
+                                color="#222222", alpha=0.35, label="samples used in fit")
         for marker in self.markers:
             marker_time = float(marker["time_min"])
             if self.time_min[0] <= marker_time <= self.time_min[-1]:
@@ -300,6 +347,13 @@ class FitWindow:
         else:
             self.ax.set_xlim(self.time_min[0], self.time_min[-1])
         self.canvas.draw_idle()
+        if PLOT_MISMATCHES:
+            sizes = PLOT_MISMATCHES.pop()
+            self.readout.set(
+                self.readout.get()
+                + f"\nWarning: series of {sizes[0]} and {sizes[1]} samples were trimmed to draw "
+                "the preview; the data may have lost a sample."
+            )
 
     def fit_line_width_changed(self) -> None:
         self.signal_width_text.set(f"{float(self.signal_width_var.get()):.1f}")
@@ -566,6 +620,7 @@ class PretreatmentApp:
         from matplotlib.figure import Figure
         from matplotlib.widgets import RectangleSelector
 
+        install_callback_logger(root)
         self.tk, self.ttk, self.root = tk, ttk, root
         self.RectangleSelector = RectangleSelector
         root.title("RWD Fiber Pretreatment — Fiber Photometry")
@@ -2768,6 +2823,20 @@ class PretreatmentApp:
         self.draw_markers(); self.capture_initial_view()
         self.initialize_hover_artists(); self.initialize_box_zoom()
         self.update_scale_readouts(); self.canvas.draw_idle()
+        self.report_plot_mismatches()
+
+    def report_plot_mismatches(self) -> None:
+        """Surface a trimmed plot series instead of hiding it."""
+        if not PLOT_MISMATCHES:
+            return
+        recent = PLOT_MISMATCHES[-3:]
+        PLOT_MISMATCHES.clear()
+        note = "; ".join("/".join(str(value) for value in sizes) for sizes in recent)
+        self.vars["status"].set(
+            f"Series of different length were trimmed to draw the figure ({note} samples). "
+            "The recording may contain a dropped or duplicated sample."
+        )
+        record_error(f"plot length mismatch (x/y): {note}")
 
     def style_axis(self, ax: Any) -> None:
         ax.set_facecolor("#FCFCFC")
@@ -3371,16 +3440,22 @@ class PretreatmentApp:
             zscore_sem = signal_average["zscore_sem"].to_numpy(float)
             mean_color = color if multiple_signals else "#5B2C83"
             mean_label = signal_label if multiple_signals else "Mean"
-            axes[1].plot(relative_time, dff_mean, color=mean_color, lw=2.0,
+            dff_x, dff_y = aligned_arrays(relative_time, dff_mean)
+            axes[1].plot(dff_x, dff_y, color=mean_color, lw=2.0,
                          label=mean_label, gid="dff" if interactive else None)
-            axes[3].plot(relative_time, zscore_mean, color=mean_color, lw=2.0,
+            zscore_x, zscore_y = aligned_arrays(relative_time, zscore_mean)
+            axes[3].plot(zscore_x, zscore_y, color=mean_color, lw=2.0,
                          label=mean_label, gid="zscore" if interactive else None)
             if np.any(np.isfinite(dff_sem)):
-                axes[1].fill_between(relative_time, dff_mean - dff_sem, dff_mean + dff_sem,
+                band_x, band_low, band_high = aligned_arrays(
+                    relative_time, dff_mean - dff_sem, dff_mean + dff_sem)
+                axes[1].fill_between(band_x, band_low, band_high,
                                      color=mean_color, alpha=0.20,
                                      label="SEM" if not multiple_signals else None)
             if np.any(np.isfinite(zscore_sem)):
-                axes[3].fill_between(relative_time, zscore_mean - zscore_sem, zscore_mean + zscore_sem,
+                band_z, band_z_low, band_z_high = aligned_arrays(
+                    relative_time, zscore_mean - zscore_sem, zscore_mean + zscore_sem)
+                axes[3].fill_between(band_z, band_z_low, band_z_high,
                                      color=mean_color, alpha=0.20,
                                      label="SEM" if not multiple_signals else None)
 
@@ -3433,6 +3508,7 @@ class PretreatmentApp:
         self.initialize_box_zoom()
         self.update_scale_readouts()
         self.canvas.draw_idle()
+        self.report_plot_mismatches()
 
     def calculate_normalization(self, allow_refresh: bool = True) -> None:
         from tkinter import messagebox
@@ -3685,11 +3761,12 @@ class PretreatmentApp:
             color = palette[signal_index % len(palette)]
             signal_trials = self.event_trials.loc[self.event_trials["event_signal_key"] == signal["key"]]
             for _trial_number, trial in signal_trials.groupby("trial", sort=True):
-                trial_time = trial["relative_time_s"].to_numpy(float)
-                axes[0].plot(trial_time, trial["dff_percent"].to_numpy(float),
-                             color=color, lw=1.0, alpha=0.45)
-                axes[1].plot(trial_time, trial["zscore"].to_numpy(float),
-                             color=color, lw=1.0, alpha=0.45)
+                dff_x, dff_y = aligned_arrays(trial["relative_time_s"].to_numpy(float),
+                                              trial["dff_percent"].to_numpy(float))
+                axes[0].plot(dff_x, dff_y, color=color, lw=1.0, alpha=0.45)
+                z_x, z_y = aligned_arrays(trial["relative_time_s"].to_numpy(float),
+                                          trial["zscore"].to_numpy(float))
+                axes[1].plot(z_x, z_y, color=color, lw=1.0, alpha=0.45)
             average = self.event_average.loc[self.event_average["event_signal_key"] == signal["key"]]
             relative_time = average["relative_time_s"].to_numpy(float)
             mean_label = signal["label"] if len(signals) > 1 else "Mean ± SEM"
@@ -3700,10 +3777,12 @@ class PretreatmentApp:
                 mean_values = average[mean_column].to_numpy(float)
                 sem_values = average[sem_column].to_numpy(float)
                 mean_color = "#222222" if len(signals) <= 1 else color
-                axis.plot(relative_time, mean_values, color=mean_color, lw=2.0, label=mean_label)
+                mean_x, mean_y = aligned_arrays(relative_time, mean_values)
+                axis.plot(mean_x, mean_y, color=mean_color, lw=2.0, label=mean_label)
                 if np.any(np.isfinite(sem_values)):
-                    axis.fill_between(relative_time, mean_values - sem_values, mean_values + sem_values,
-                                      color=mean_color, alpha=0.14)
+                    band_x, band_low, band_high = aligned_arrays(
+                        relative_time, mean_values - sem_values, mean_values + sem_values)
+                    axis.fill_between(band_x, band_low, band_high, color=mean_color, alpha=0.14)
         for ax, label in zip(axes, ["dF/F0 (%)", "Z-score"]):
             ax.axvspan(baseline_start, 0, color="#B8B8B8", alpha=0.18)
             ax.axvline(0, color="#C43C39", ls="--", lw=1.0)

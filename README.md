@@ -117,6 +117,18 @@ selected, when the saved parameters are missing, or when the saved fitted curve 
 match the current data range. Those channels appear in the "refit needed" list before the
 initialisation is applied.
 
+## Tracebacks
+
+An exception raised inside a Tk callback is written in full to `aaplot_errors.log`
+next to `app.py`, as well as being printed to the console, so it can be sent on
+without copying the terminal. The log is ignored by git and is appended to, never
+overwritten.
+
+Series that reach a plot with different lengths are trimmed to the shorter one and
+reported in the status line instead of aborting the redraw, because matplotlib
+refuses to draw mismatched series and one dropped sample used to take the whole
+figure down.
+
 ## Time units
 
 Every duration or timestamp field has an **s / min** selector next to it. Each field opens
@@ -549,6 +561,12 @@ Original input files are read-only and are never modified.
 - The **Estimate** exclusion window is now set by its own two fields under the weight,
   defaulting to 5 s before and 60 s after each marker, instead of borrowing the Event
   Analysis window. Retuning the event window no longer moves the weight.
+- A plotting call that receives series of different lengths now trims them to the
+  shorter one and says so in the status line (`Series of different length were trimmed
+  to draw the figure (14062/14061 samples)`), instead of raising
+  `ValueError: x and y must have same first dimension`.
+- Callback tracebacks are written to `aaplot_errors.log` beside `app.py` in addition to
+  the console.
 - Fixed a crash when previewing the PLS fit: the preview asked for its own parameter list
   (regions used, slope) that a penalized fit does not have, and the readout then raised
   `KeyError: 'final_refinement_samples'`. The preview now falls back through the keys the
