@@ -42,7 +42,10 @@ and downsampling are off by default; enable them only when needed.
   interval. Splitting the two keeps the curve at zero across the baseline while the amplitude is
   expressed relative to the declared F0 — so changing the baseline rescales the response by
   `1 / F0`, and changing the offset moves F0 as well.
-- Z-score uses the dF/F0 mean and sample SD in the same baseline.
+- Z-score uses the dF/F0 mean and sample SD in the same baseline. It is therefore **scale
+  invariant**: changing the baseline rescales dF/F0 but leaves the Z-score curve unchanged,
+  because the same factor cancels in `(dF/F0 − mean) / SD`. The dF/F0 panel label carries the
+  F0 it was divided by (`470 dF/F0 (%) | F0 = 0.9`) so the two can be told apart.
 
 Every corrected wavelength is also normalized separately and retained as
 `dff_<wavelength>_percent` and `zscore_<wavelength>` (for example `dff_560_percent` and

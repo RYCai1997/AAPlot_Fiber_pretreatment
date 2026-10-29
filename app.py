@@ -2926,14 +2926,14 @@ class PretreatmentApp:
                 self.plot_display(ax, x, self.display_values("dff_percent")[indices], color="#7B4B94",
                         lw=self.line_width("dff"), gid="dff")
                 ax.axhline(0, color="#777777", lw=0.7, alpha=0.7)
-                ax.set_ylabel("dF/F0 (%)")
+                ax.set_ylabel(self.dff_axis_label("dF/F0"))
                 self.shade_normalization_baseline(ax)
             elif key.startswith("dff") and key[3:] in self.available_wavelengths:
                 wavelength = key[3:]
                 self.plot_display(ax, x, self.display_values(f"dff_{wavelength}_percent")[indices],
                         color=WAVELENGTH_COLORS[wavelength][1], lw=self.line_width("dff"), gid="dff")
                 ax.axhline(0, color="#777777", lw=0.7, alpha=0.7)
-                ax.set_ylabel(f"{wavelength} dF/F0 (%)")
+                ax.set_ylabel(self.dff_axis_label(f"{wavelength} dF/F0"))
                 self.shade_normalization_baseline(ax)
             elif key == "zscore":
                 self.plot_display(ax, x, self.display_values("zscore")[indices], color="#7B4B94",
@@ -2960,6 +2960,14 @@ class PretreatmentApp:
         self.initialize_hover_artists(); self.initialize_box_zoom()
         self.update_scale_readouts(); self.canvas.draw_idle()
         self.report_plot_mismatches()
+
+    def dff_axis_label(self, prefix: str) -> str:
+        """Axis label that carries the F0 the curve was divided by."""
+        try:
+            f0 = self.combined_f0()
+        except ValueError:
+            return f"{prefix} (%)"
+        return f"{prefix} (%) | F0 = {f0:.6g}"
 
     def f0_summary(self) -> str:
         """Show the F0 each visible channel is being divided by, so an edit is traceable."""
