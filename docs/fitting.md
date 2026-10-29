@@ -32,6 +32,39 @@ Use the plotted **Fit** curve together with the reported `correction_constant` a
 `correction_scale` in `parameters_and_marker_edits.json` to verify what was subtracted and
 where the trace was anchored.
 
+### Fitting Baseline, and the F0 it defines
+
+The **Fitting Baseline** is the fluorescence level at the start of the recording, read from the
+**raw** trace, so it still contains the instrument offset. Everything downstream — the fit, the
+corrected traces, dF/F0 — works on the `raw − offset` scale, so the offset is subtracted from
+the entered baseline as well:
+
+```
+F0 = fitting baseline − offset
+```
+
+That F0 is the denominator of dF/F0, for the whole trace and for every event trial, so it has
+to be right: a baseline that is too large makes the response look too small and vice versa.
+Both fields therefore change the numbers you get:
+
+| Edited | Effect |
+| --- | --- |
+| Offset | Subtracted from the trace *and* from F0, so dF/F0 rises as the offset rises (a too-small offset under-reports the response) |
+| Fitting baseline | Sets F0 directly; dF/F0 scales as `1 / F0` |
+
+The same value seeds the constant of the fit (`fit_constant`) on the offset-subtracted scale.
+Note that the two fit modes use the constant differently: `fit_constant` only starts there and
+lets the optimizer find the asymptote, while `fixed` pins the **asymptote** of the curve — the
+level the trace decays to — not its level at t₀. Pinning a t₀ level therefore reshapes the
+whole decay, and the fit window warns when the pinned value disagrees with the tail of the data
+by more than 5 %. Use `fit_constant` when the field holds the level at the start of the
+recording. Each channel's parameters record both numbers as `entered_baseline` and
+`effective_baseline`.
+
+If the entered baseline is **not larger than the offset**, the program cannot subtract the
+offset from it without going negative, so it falls back to reading the value as an
+already-subtracted level and appends the reason to `fit_warnings` and to the status line.
+
 ## Fitting models
 
 - The fitting window supports linear, single-exponential, double-exponential and PLS

@@ -5,6 +5,21 @@ manual.
 
 ## 2026-10-29
 
+- The **Fitting Baseline** now defines F0 instead of being absorbed by the fit. It is read as
+  the raw fluorescence level at the start of the recording, the offset is subtracted from it
+  (`F0 = baseline − offset`), and that F0 is the denominator of dF/F0 both for the whole trace
+  and for every event trial. Previously the fit took the value as an initial guess and the
+  correction divided by it, so the two cancelled: editing the baseline changed nothing, and
+  editing the offset only nudged the answer. Now dF/F0 scales as `1 / F0`, a larger offset
+  raises the response, and the whole-trace and event results move together.
+- The numerator of dF/F0 is still referenced to the mean of the baseline interval, so the trace
+  keeps starting at zero; only the denominator comes from the declared baseline. A ratio trace
+  has no count scale and keeps the interval mean.
+- A baseline that is not larger than the offset is read as an already offset-subtracted level
+  and the reason is written to `fit_warnings` and the status line, so an old session cannot
+  silently produce a negative F0. Each channel records `entered_baseline` and
+  `effective_baseline`, and the fit-window preview uses the same offset-subtracted value the
+  Apply button does.
 - Reproduced RWD's 470/410 motion correction as a third channel combination, `rwd`, and made it
   the default. The corrected analysis channel is regressed on the corrected reference with a
   robust (`soft_l1`) straight line, the fitted prediction is subtracted, and the result is put

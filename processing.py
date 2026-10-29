@@ -722,6 +722,34 @@ def estimate_reference_weight(
     return relative_weight * matched
 
 
+def effective_baseline(
+    baseline: float | None,
+    offset: float | None,
+) -> tuple[float | None, str]:
+    """Turn the entered fitting baseline into the F0 of the offset-subtracted trace.
+
+    The fit, the corrected traces and dF/F0 all live on the ``raw - offset`` scale, so a
+    plateau typed from the raw trace still contains the instrument offset and has to have
+    it removed. Returns ``(F0, note)``; ``F0`` is None when no baseline was entered and
+    ``note`` explains a fallback, empty otherwise.
+    """
+    if baseline is None:
+        return None, ""
+    try:
+        baseline = float(baseline)
+    except (TypeError, ValueError):
+        return None, ""
+    if not np.isfinite(baseline) or baseline <= 0:
+        return None, ""
+    offset = 0.0 if offset is None else float(offset)
+    candidate = baseline - offset
+    if not np.isfinite(candidate) or candidate <= 0:
+        return baseline, ("The fitting baseline is not larger than the offset, so it is read as an "
+                          "already offset-subtracted level; enter the raw fluorescence level if it "
+                          "was meant to include the offset")
+    return candidate, ""
+
+
 def select_effective_data(data: pd.DataFrame, config: ProcessingConfig) -> pd.DataFrame:
     time_min = data["TimeStamp"].to_numpy(float) / 60000
     use = (time_min >= config.range_start_min) & (time_min <= config.range_end_min)
@@ -795,6 +823,10 @@ def process_data(
             raise ValueError(f"{column} contains fewer than 20 valid samples in the selected range.")
         offset = float(config.offsets[wavelength])
         baseline = float(config.baselines[wavelength])
+        # The fit works on (raw - offset), so the entered plateau has to lose the offset too.
+        fit_baseline, baseline_note = effective_baseline(baseline if baseline else None, offset)
+        if fit_baseline is None:
+            fit_baseline = baseline
         adjusted = raw - offset
         regions = [tuple(region) for region in config.fit_regions.get(wavelength, [])]
         mask = region_mask(time_min, regions)
@@ -802,7 +834,7 @@ def process_data(
         baseline_mode = config.fit_baseline_modes.get(wavelength) or "fit_constant"
         beta = config.fit_betas.get(wavelength)
         lam = config.fit_lambdas.get(wavelength)
-        cache_key = fit_cache_key(data_token, source, column, model, baseline_mode, offset, baseline,
+        cache_key = fit_cache_key(data_token, source, column, model, baseline_mode, offset, fit_baseline,
                                   regions, config.range_start_min, config.range_end_min,
                                   None if beta is None else float(beta),
                                   None if lam is None else float(lam))
@@ -812,7 +844,7 @@ def process_data(
             parameters["fit_reused_from_cache"] = True
         else:
             fitted, parameters = fit_bleaching(
-                time_s, adjusted, baseline, model, mask, baseline_mode,
+                time_s, adjusted, fit_baseline, model, mask, baseline_mode,
                 beta=PLS_DEFAULT_BETA if beta is None else float(beta),
                 lam=PLS_DEFAULT_LAMBDA if lam is None else float(lam),
             )
@@ -828,6 +860,10 @@ def process_data(
                 "This is a bug rather than a data problem; report it with the recording."
             )
         parameters["fit_regions"] = [list(region) for region in regions]
+        parameters["entered_baseline"] = float(baseline)
+        parameters["effective_baseline"] = float(fit_baseline)
+        if baseline_note:
+            parameters.setdefault("fit_warnings", []).append(baseline_note)
         constant = parameters.get("fitted_constant")
         if constant is None:
             constant = parameters.get("fixed_baseline", 0.0)
@@ -859,13 +895,15 @@ def process_data(
                 f"{first_bad:.3f} min); they are left out of the fit and the corrected trace "
                 "is a gap there"
             )
-        if baseline_mode == "fixed" and float(baseline) != 0.0:
+        if baseline_mode == "fixed" and float(fit_baseline) != 0.0:
             tail = adjusted[np.isfinite(adjusted)][-max(20, int(0.05 * np.isfinite(adjusted).sum())):]
             plateau = float(np.median(tail)) if tail.size else float("nan")
-            if np.isfinite(plateau) and plateau != 0.0 and not 0.95 <= float(baseline) / plateau <= 1.05:
+            if np.isfinite(plateau) and plateau != 0.0 and not 0.95 <= float(fit_baseline) / plateau <= 1.05:
                 parameters.setdefault("fit_warnings", []).append(
-                    f"The fixed baseline {float(baseline):.6g} is not the plateau of the data "
-                    f"({plateau:.6g}); the fixed mode pins the fitted curve to the baseline"
+                    f"The fixed baseline {float(fit_baseline):.6g} (after subtracting the offset "
+                    f"{offset:g}) is not the plateau of the data ({plateau:.6g}); the fixed mode "
+                    "pins the asymptote of the fitted curve there. Use Fit Constant if the value "
+                    "is the level at the start of the recording."
                 )
         output_columns[f"raw_{wavelength}"] = raw
         output_columns[f"offset_adjusted_{wavelength}"] = adjusted
@@ -971,10 +1009,19 @@ def calculate_normalized_traces(
     smooth_seconds: float,
     sample_rate_hz: float,
     zero_time_min: float | None = None,
+    f0_overrides: dict[str, float] | None = None,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
-    """Calculate dF/F0 and z-score from a user-selected baseline interval."""
+    """Calculate dF/F0 and z-score from a user-selected baseline interval.
+
+    ``f0_overrides`` maps ``"analysis"`` and wavelength labels to an F0 taken from the
+    fitting baseline (already offset-subtracted). An override replaces both the level the
+    trace is referenced to and the denominator, so editing the baseline moves dF/F0; the
+    interval still decides the Z-score centre and scale.
+    """
     if baseline_end_min <= baseline_start_min:
         raise ValueError("The normalization baseline end time must be greater than the start time.")
+    overrides = {str(key): float(value) for key, value in (f0_overrides or {}).items()
+                 if value is not None and np.isfinite(float(value)) and float(value) > 0}
     result = processed.copy()
     time_min = result["time_min"].to_numpy(float)
     trace = result["analysis_trace"].to_numpy(float)
@@ -982,10 +1029,17 @@ def calculate_normalized_traces(
                      & np.isfinite(trace))
     if baseline_mask.sum() < 20:
         raise ValueError("The normalization baseline interval contains fewer than 20 valid data points.")
-    f0 = float(np.mean(trace[baseline_mask]))
+    level = float(np.mean(trace[baseline_mask]))
+    f0 = overrides.get("analysis")
+    f0_source = "denominator: fitting baseline minus offset"
+    if f0 is None:
+        f0 = level
+        f0_source = "denominator: mean of the baseline interval"
     if not np.isfinite(f0) or np.isclose(f0, 0):
-        raise ValueError("F0 in the normalization baseline interval is zero or invalid, so dF/F0 cannot be calculated.")
-    dff = 100.0 * (trace - f0) / f0
+        raise ValueError("F0 is zero or invalid, so dF/F0 cannot be calculated.")
+    # The numerator stays referenced to the trace's own baseline level, so the curve starts
+    # at zero; the denominator is the fluorescence the user declared.
+    dff = 100.0 * (trace - level) / f0
     baseline_dff = dff[baseline_mask & np.isfinite(dff)]
     z_center = float(np.mean(baseline_dff))
     z_scale = float(np.std(baseline_dff, ddof=1))
@@ -1017,10 +1071,13 @@ def calculate_normalized_traces(
             result[f"dff_{label}_percent_smoothed"] = np.full(len(result), np.nan)
             result[f"zscore_{label}_smoothed"] = np.full(len(result), np.nan)
             continue
-        channel_f0 = float(np.mean(values[valid_baseline]))
+        channel_level = float(np.mean(values[valid_baseline]))
+        channel_f0 = overrides.get(label)
+        if channel_f0 is None:
+            channel_f0 = channel_level
         if not np.isfinite(channel_f0) or np.isclose(channel_f0, 0):
             raise ValueError(f"F0 for corrected {label} is zero or invalid.")
-        channel_dff = 100.0 * (values - channel_f0) / channel_f0
+        channel_dff = 100.0 * (values - channel_level) / channel_f0
         baseline_channel_dff = channel_dff[valid_baseline]
         channel_sd = float(np.std(baseline_channel_dff, ddof=1))
         if not np.isfinite(channel_sd) or channel_sd <= np.finfo(float).eps:
@@ -1051,6 +1108,9 @@ def calculate_normalized_traces(
         "baseline_end_min": float(baseline_end_min),
         "samples": int(baseline_mask.sum()),
         "f0_mean": f0,
+        "f0_source": f0_source,
+        "level_mean": level,
+        "f0_overrides": {key: float(value) for key, value in overrides.items()},
         "dff_baseline_mean": z_center,
         "dff_baseline_sd": z_scale,
         "smooth_seconds": float(smooth_seconds),
@@ -1068,6 +1128,7 @@ def calculate_event_locked_traces(
     post_seconds: float,
     baseline_seconds: float,
     signal_column: str = "analysis_trace",
+    f0_override: float | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
     """Split a corrected signal around repeated events and normalize each trial independently."""
     if signal_column not in processed:
@@ -1125,7 +1186,11 @@ def calculate_event_locked_traces(
             continue
         trace = np.interp(absolute_time, time_s, signal)
         baseline_values = trace[baseline_mask]
-        f0 = float(np.mean(baseline_values))
+        # A typed fitting baseline (minus its offset) is the denominator, so editing it moves
+        # the trial dF/F0 exactly as it moves the whole-trace dF/F0; the numerator is still
+        # referenced to this trial's own pre-marker level.
+        level = float(np.mean(baseline_values))
+        f0 = float(f0_override) if f0_override is not None else level
         if not np.isfinite(f0) or np.isclose(f0, 0):
             excluded.append({
                 "event_index": event_index,
@@ -1133,7 +1198,7 @@ def calculate_event_locked_traces(
                 "reason": "the trial baseline mean is zero or invalid",
             })
             continue
-        dff = 100.0 * (trace - f0) / f0
+        dff = 100.0 * (trace - level) / f0
         baseline_dff = dff[baseline_mask]
         baseline_center = float(np.mean(baseline_dff))
         baseline_sd = float(np.std(baseline_dff, ddof=1))

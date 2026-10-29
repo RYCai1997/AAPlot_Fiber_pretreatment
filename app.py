@@ -73,6 +73,7 @@ from processing import (
     changed_fit_channels,
     combine_channels,
     compare_configs,
+    effective_baseline,
     config_from_saved,
     estimate_reference_weight,
     load_saved_analysis,
@@ -170,7 +171,10 @@ class FitWindow:
         self.time_min = self.time_s / 60
         raw = subset[f"{config.source_channel}-{channel}"].to_numpy(float)
         offset = config.offsets[channel]
-        self.baseline = config.baselines[channel]
+        # The window previews the same fit Apply runs, so it uses the offset-subtracted
+        # baseline the plateau in the field refers to.
+        self.baseline = effective_baseline(config.baselines[channel], offset)[0] \
+            or config.baselines[channel]
         self.values = raw - offset
         self.regions = [tuple(sorted(region)) for region in existing_regions]
         start, end = float(self.time_min[0]), float(self.time_min[-1])
@@ -1264,6 +1268,29 @@ class PretreatmentApp:
         if not math.isfinite(value):
             raise ValueError(f"{key} must be a finite number.")
         return value
+
+    def fit_f0(self, channel: str) -> tuple[float | None, str]:
+        """F0 of one channel from its fitting baseline, with the offset already removed."""
+        try:
+            baseline = self.optional_number(f"baseline{channel}")
+            offset = self.optional_number(f"offset{channel}")
+        except Exception:  # noqa: BLE001 - an unparseable field simply gives no F0
+            return None, ""
+        return effective_baseline(baseline, offset)
+
+    def f0_overrides(self) -> dict[str, float]:
+        """F0 values the typed baselines impose, keyed the way the normalizer expects."""
+        overrides: dict[str, float] = {}
+        analysis = self.analysis_wavelength_var.get()
+        combined_is_counts = self.vars["combine"].get() != "ratio"
+        f0, _note = self.fit_f0(analysis)
+        if f0 is not None and combined_is_counts:
+            overrides["analysis"] = float(f0)
+        for channel in self.available_wavelengths:
+            channel_f0, _note = self.fit_f0(channel)
+            if channel_f0 is not None:
+                overrides[channel] = float(channel_f0)
+        return overrides
 
     def optional_number(self, key: str) -> float | None:
         if not self.vars[key].get().strip():
@@ -3381,6 +3408,20 @@ class PretreatmentApp:
         return (marker_name, pre_seconds, post_seconds, baseline_seconds,
                 selected_ids, selected_signal_keys)
 
+    def event_signal_f0(self, signal: dict[str, str]) -> float | None:
+        """F0 of one event signal, taken from the fitting baseline of its own channel.
+
+        A ratio trace lives on no count scale, so it keeps the per-trial baseline mean.
+        """
+        if signal.get("kind") == "wavelength":
+            channel = str(signal.get("key", "")).split(":", 1)[-1]
+        else:
+            if self.vars["combine"].get() == "ratio":
+                return None
+            channel = self.analysis_wavelength_var.get()
+        f0, _note = self.fit_f0(channel)
+        return None if f0 is None else float(f0)
+
     def calculate_event_analysis(self, allow_refresh: bool = True) -> None:
         from tkinter import messagebox
         if self.processed is None or self.details is None:
@@ -3403,6 +3444,7 @@ class PretreatmentApp:
             for signal in selected_signals:
                 event_source = self.processed[["original_time_s"]].copy()
                 event_source["event_signal"] = self.event_signal_values(signal)
+                signal_f0 = self.event_signal_f0(signal)
                 trials, average, details = calculate_event_locked_traces(
                     event_source,
                     marker_times,
@@ -3411,6 +3453,7 @@ class PretreatmentApp:
                     post_seconds,
                     baseline_seconds,
                     signal_column="event_signal",
+                    f0_override=signal_f0,
                 )
                 trials.insert(0, "event_signal_label", signal["label"])
                 trials.insert(0, "event_signal_key", signal["key"])
@@ -3428,6 +3471,9 @@ class PretreatmentApp:
                 signal_details[signal["key"]] = {
                     "label": signal["label"],
                     "kind": signal["kind"],
+                    "f0_override": signal_f0,
+                    "f0_source": ("fitting baseline minus offset" if signal_f0 is not None
+                                  else "mean of each trial's pre-marker baseline"),
                     **{key: value for key, value in signal.items()
                        if key not in {"key", "label", "kind"}},
                     **details,
@@ -3598,6 +3644,7 @@ class PretreatmentApp:
                 self.smoothing_seconds(),
                 float(self.details["sample_rate_hz"]),
                 zero_time,
+                f0_overrides=self.f0_overrides(),
             )
             normalization_details["baseline_definition"] = baseline_definition
             normalization_details["zero_definition"] = zero_definition
@@ -3607,9 +3654,12 @@ class PretreatmentApp:
             self.event_view_active = False
             self.display_cache.clear()
             self.rebuild_axes(); self.draw_processed()
+            source = normalization_details.get("f0_source", "")
+            f0_note = self.fit_f0(self.analysis_wavelength_var.get())[1]
             self.vars["status"].set(
-                f"Normalization complete: F0={normalization_details['f0_mean']:.7g}, "
-                f"baseline samples={normalization_details['samples']:,}."
+                f"Normalization complete: F0={normalization_details['f0_mean']:.7g} "
+                f"({source}), baseline samples={normalization_details['samples']:,}."
+                + (f" {f0_note}." if f0_note else "")
             )
         except Exception as exc:
             messagebox.showerror("Normalization Failed", str(exc))
