@@ -3,6 +3,14 @@
 These steps all start from an applied correction. Nothing here changes the corrected traces
 in the files that are written; display smoothing and downsampling are recorded in the JSON.
 
+The correction is their only input, so a recomputed correction carries through on its own: if
+dF/F0 and the event analysis were already on screen, they are recalculated from the new traces
+whenever **Apply Correction** runs — including when it runs because a pending offset or baseline
+edit was picked up by **Calculate dF/F0 & Z-score** or **Calculate Event dF/F0 & Z-score**. The
+status line then names the F0 each channel is divided by
+(`F0: 410=3105, 470=3105; 470/410 F0=1`), so an edit can be followed from the field to the
+percentage.
+
 ## Display processing
 
 The **Trace Display** options select which curves are drawn (**Raw + Corrected**, **Raw

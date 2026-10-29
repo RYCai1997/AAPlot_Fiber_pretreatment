@@ -2402,6 +2402,10 @@ class PretreatmentApp:
 
     def apply_processed_result(self) -> None:
         from tkinter import messagebox
+        # A correction is the input of dF/F0 and of the event analysis, so whatever was already
+        # computed is recomputed from the new traces instead of being discarded.
+        had_normalization = bool(self.normalized)
+        had_events = self.event_average is not None and self.event_details is not None
         self.last_applied_config = self.pending_config
         self.pending_config = None
         self.normalized = False
@@ -2441,6 +2445,21 @@ class PretreatmentApp:
             "The current display remains unsmoothed and not downsampled. Apply display processing from "
             "the Full trace analysis tab if needed."
         )
+        f0_note = self.f0_summary()
+        if f0_note:
+            self.vars["status"].set(self.vars["status"].get() + f0_note)
+        # Everything that was on screen is rebuilt from the new traces: the correction is the
+        # only input of dF/F0 and of the event analysis, so they must not be left behind.
+        if had_normalization:
+            try:
+                self.calculate_normalization(allow_refresh=False)
+            except Exception as exc:  # noqa: BLE001 - reported in the status, not as a dialog
+                self.vars["status"].set(f"dF/F0 could not be recomputed: {exc}")
+        if had_events:
+            try:
+                self.calculate_event_analysis(allow_refresh=False)
+            except Exception as exc:  # noqa: BLE001 - reported in the status, not as a dialog
+                self.vars["status"].set(f"Event analysis could not be recomputed: {exc}")
         continuation, self.pending_continuation = self.pending_continuation, None
         if continuation is not None:
             try:
@@ -2914,6 +2933,24 @@ class PretreatmentApp:
         self.initialize_hover_artists(); self.initialize_box_zoom()
         self.update_scale_readouts(); self.canvas.draw_idle()
         self.report_plot_mismatches()
+
+    def f0_summary(self) -> str:
+        """Show the F0 each visible channel is being divided by, so an edit is traceable."""
+        parts = []
+        for channel in self.available_wavelengths:
+            try:
+                parts.append(f"{channel}={self.fit_f0(channel):g}")
+            except ValueError:
+                continue
+        if not parts:
+            return ""
+        combined = ""
+        try:
+            combined = f"; {self.analysis_wavelength_var.get()}/{self.reference_wavelength_var.get()} " \
+                       f"F0={self.combined_f0():.6g}"
+        except ValueError:
+            combined = ""
+        return f" F0: {', '.join(parts)}{combined}."
 
     def gap_fill_note(self) -> str:
         """One short sentence about the empty cells that were bridged while loading."""

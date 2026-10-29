@@ -102,7 +102,7 @@ the exact file list.
 | `Series of different length were trimmed ...` in the status line | Two series reached a plot with different lengths; they are trimmed and reported instead of aborting the redraw. Usually an empty cell in the recording. |
 | `6 cells in CH1-410 left as a gap` | More than 3 consecutive samples are missing. The trace keeps a gap there; fill or remove those rows in `Fluorescence.csv` if they are not a real dropout. |
 | Apply does nothing / asks to confirm regions | A data-range, model or baseline-mode change invalidates that channel's confirmed fit. Offset and baseline edits do not. |
-| Event results vanish after changing the combination | Trials are computed from the stored combination trace, so they are cleared and must be recalculated. |
+| Event results vanish after changing the combination | Trials are computed from the stored combination trace; they are recomputed on the next apply, and cleared if the combination itself changed. |
 | A single-wavelength recording | Set **Reference Wavelength** to `None`; the combination is skipped and the corrected channel is analysed on its own. |
 | `The fitting baseline for 470 (...) must be larger than the offset` | The baseline is the **raw** level, offset included; F0 = baseline − offset has to stay positive. Enter the level you read off the raw trace, or correct the offset. |
 | dF/F0 comes out about twice too large or too small | Check that the **Fitting Baseline** is the raw level of the trace minimum and not an already-subtracted one: F0 is the denominator, so a wrong baseline scales every dF/F0 by the same factor. |
