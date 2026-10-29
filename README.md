@@ -46,9 +46,10 @@ tab. Edits are kept in memory and written to `markers_working_copy.csv` on expor
 
 1. **Data & Fitting** — click **Select Recording Folder**, choose the **Recording Channel**, set
    the **Valid Data Range**, then enter each visible **Offset** and **Fitting Baseline**. The
-   baseline is the fluorescence level you read off the **raw** trace at the start of the
-   recording, so it still contains the offset: the program subtracts the offset from it and uses
-   the result as F0, the scale of the corrected trace and the denominator of dF/F0. A baseline
+   baseline is the **lowest point of the trace after bleaching** — the plateau the signal
+   decays to — read off the **raw** plot, so it still contains the offset: the program subtracts
+   the offset from it and uses the result as F0, the level the corrected trace sits on and the
+   denominator of dF/F0. A baseline
    that is not larger than the offset is rejected with an error naming the channel, because
    nothing would be left of it once the offset is removed.
 2. Open **Configure <wavelength> Fit...** for every wavelength, select one or more regions and a
@@ -104,7 +105,7 @@ the exact file list.
 | Event results vanish after changing the combination | Trials are computed from the stored combination trace, so they are cleared and must be recalculated. |
 | A single-wavelength recording | Set **Reference Wavelength** to `None`; the combination is skipped and the corrected channel is analysed on its own. |
 | `The fitting baseline for 470 (...) must be larger than the offset` | The baseline is the **raw** level, offset included; F0 = baseline − offset has to stay positive. Enter the level you read off the raw trace, or correct the offset. |
-| dF/F0 comes out about twice too large or too small | Check that the **Fitting Baseline** is the raw level at t0 and not an already-subtracted one: F0 is the denominator, so a wrong baseline scales every dF/F0 by the same factor. |
+| dF/F0 comes out about twice too large or too small | Check that the **Fitting Baseline** is the raw level of the trace minimum and not an already-subtracted one: F0 is the denominator, so a wrong baseline scales every dF/F0 by the same factor. |
 
 ## Author and development
 

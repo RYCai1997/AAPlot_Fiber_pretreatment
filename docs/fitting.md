@@ -7,9 +7,14 @@ combination (see [channels.md](channels.md)).
 ## Bleaching correction
 
 ```
-corrected(t) = F0 + [(raw(t) − offset) − F(t)]
-F0 = fitting baseline − offset
+corrected(t) = raw(t) − F(t) + (fitting baseline − offset)
+             = F0 + [(raw(t) − offset) − F(t)],        F0 = fitting baseline − offset
 ```
+
+Both lines are the same expression: the first is how the correction reads, the second is how it
+is evaluated. The fitted bleaching curve is subtracted in counts and the result is put back on
+F0, so the corrected trace sits at the fluorescence the user declared for the minimum of the
+signal.
 
 - `raw(t)` is the recorded fluorescence of that wavelength.
 - `offset` is the instrument reading with no sample attached — fluorescence that carries no
@@ -46,10 +51,10 @@ where the trace was anchored.
 
 ### Fitting Baseline, and the F0 it defines
 
-The **Fitting Baseline** is the fluorescence level at the start of the recording, read from the
-**raw** trace, so it still contains the instrument offset. Everything downstream — the fit, the
-corrected traces, dF/F0 — works on the `raw − offset` scale, so the offset is subtracted from
-the entered baseline as well:
+The **Fitting Baseline** is the **lowest point of the trace after bleaching** — the plateau the
+signal decays to — read off the **raw** plot, so it still contains the instrument offset.
+Everything downstream — the fit, the corrected traces, dF/F0 — works on the `raw − offset`
+scale, so the offset is subtracted from the entered baseline as well:
 
 ```
 F0 = fitting baseline − offset
@@ -64,14 +69,13 @@ response look too small and vice versa. Both fields therefore change the numbers
 | Offset | Subtracted from the trace *and* from F0, so dF/F0 rises as the offset rises (a too-small offset under-reports the response) |
 | Fitting baseline | Sets F0 directly; dF/F0 scales as `1 / F0` |
 
-The same value seeds the constant of the fit (`fit_constant`) on the offset-subtracted scale.
-Note that the two fit modes use the constant differently: `fit_constant` only starts there and
-lets the optimizer find the asymptote, while `fixed` pins the **asymptote** of the curve — the
-level the trace decays to — not its level at t₀. Pinning a t₀ level therefore reshapes the
-whole decay, and the fit window warns when the pinned value disagrees with the tail of the data
-by more than 5 %. Use `fit_constant` when the field holds the level at the start of the
-recording. Each channel's parameters record both numbers as `entered_baseline` and
-`effective_baseline`.
+The same value is the asymptote estimate the fit uses: `fit_constant` starts there and lets the
+optimizer refine it, while `fixed` pins the asymptote to it. Because the field holds the minimum
+of the trace, both readings agree — this is the one number in the fit that the user can state
+ahead of time, and `fixed` mode now means exactly "the baseline is the minimum I measured".
+The fit window warns when the entered value disagrees with the end of the trace by more than
+5 %, which is the check that the value belongs to this recording. Each channel's parameters
+record both numbers as `entered_baseline` and `effective_baseline`.
 
 A baseline that is **not larger than the offset** cannot describe fluorescence — the offset
 would have to be removed from it and nothing would be left — so the program refuses it with an

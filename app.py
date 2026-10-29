@@ -225,7 +225,10 @@ class FitWindow:
         ttk.Label(pls_row, text="used by the PLS fit only").pack(side=tk.LEFT)
         ttk.Label(left, text="RWD default 8; smaller keeps the fit closer to the data trend.",
                   style="Hint.TLabel", wraplength=250).pack(anchor="w", pady=(0, 5))
-        ttk.Label(left, text="The baseline initializes the freely fitted constant (fit_constant).",
+        ttk.Label(left, text="The fitting baseline is the lowest point of the trace after "
+                             "bleaching, offset included; F0 = baseline - offset is where the "
+                             "corrected trace sits and what dF/F0 is divided by. It seeds "
+                             "fit_constant and pins the asymptote in fixed mode.",
                   wraplength=250).pack(anchor="w", pady=(0, 5))
         self.add_button = ttk.Button(left, text="Add Region", command=self.add_region)
         self.add_button.pack(fill=tk.X, pady=2)
@@ -806,7 +809,8 @@ class PretreatmentApp:
             self.trace_input(
                 ttk.Entry(frame, textvariable=self.vars[f"offset{wavelength}"], width=12),
             ).grid(row=0, column=1, sticky="ew")
-            ttk.Label(frame, text=f"{wavelength} Fitting Baseline").grid(row=1, column=0, sticky="w")
+            ttk.Label(frame, text=f"{wavelength} Fitting Baseline (min, raw)").grid(
+                row=1, column=0, sticky="w")
             self.trace_input(
                 ttk.Entry(frame, textvariable=self.vars[f"baseline{wavelength}"], width=12),
             ).grid(row=1, column=1, sticky="ew")
@@ -817,9 +821,9 @@ class PretreatmentApp:
             self.wavelength_frames[wavelength] = frame
             frame.grid_remove()
         row = self.section(data_tab, row, "Correction")
-        ttk.Label(data_tab, text="Corrected = F0 + [(raw − offset) − fitted(t)]\n"
-                                 "F0 = Fitting Baseline − Offset: the trace sits on the fluorescence you "
-                                 "entered, and dF/F0 is divided by the same F0.",
+        ttk.Label(data_tab, text="Corrected = raw − fitted + (Fitting Baseline − Offset)\n"
+                                 "i.e. F0 + [(raw − offset) − fitted], with F0 the lowest point of the "
+                                 "trace. The corrected trace sits on F0 and dF/F0 divides by it.",
                   wraplength=350, justify="left").grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 6)); row += 1
         row = self.section(data_tab, row, "Analysis Trace")
         ttk.Label(data_tab, text="Analysis Wavelength").grid(row=row, column=0, sticky="w")

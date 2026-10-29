@@ -729,15 +729,16 @@ def effective_baseline(
 ) -> float:
     """F0 of a channel: the entered fitting baseline minus the instrument offset.
 
-    The fit, the corrected traces and dF/F0 all live on the ``raw - offset`` scale, so the
-    plateau typed from the raw trace still contains the offset and has to have it removed.
+    The fitting baseline is the **lowest point of the trace after bleaching**, read off the
+    raw plot — so it still contains the instrument offset, which has to be removed. The result
+    is the level the corrected trace sits on and the denominator of dF/F0.
     A baseline that does not exceed the offset cannot describe fluorescence and is rejected
     instead of being reinterpreted.
     """
     tag = f" for {label}" if label else ""
     if baseline is None:
-        raise ValueError(f"Enter the fitting baseline{tag}: it is the raw fluorescence level "
-                         "at the start of the recording, offset included.")
+        raise ValueError(f"Enter the fitting baseline{tag}: it is the lowest point of the "
+                         "trace after bleaching, read off the raw plot, offset included.")
     try:
         baseline = float(baseline)
         offset = 0.0 if offset is None else float(offset)
@@ -749,8 +750,8 @@ def effective_baseline(
     if f0 <= 0:
         raise ValueError(
             f"The fitting baseline{tag} ({baseline:g}) must be larger than the offset "
-            f"({offset:g}): it is the raw fluorescence level, which still contains the offset, "
-            f"so F0 = baseline - offset has to be positive (got {f0:g})."
+            f"({offset:g}): it is the lowest point of the raw trace, which still contains the "
+            f"offset, so F0 = baseline - offset has to be positive (got {f0:g})."
         )
     return float(f0)
 
@@ -902,10 +903,10 @@ def process_data(
             plateau = float(np.median(tail)) if tail.size else float("nan")
             if np.isfinite(plateau) and plateau != 0.0 and not 0.95 <= float(fit_baseline) / plateau <= 1.05:
                 parameters.setdefault("fit_warnings", []).append(
-                    f"The fixed baseline {float(fit_baseline):.6g} (after subtracting the offset "
-                    f"{offset:g}) is not the plateau of the data ({plateau:.6g}); the fixed mode "
-                    "pins the asymptote of the fitted curve there. Use Fit Constant if the value "
-                    "is the level at the start of the recording."
+                    f"The fitting baseline implies a minimum of {float(fit_baseline):.6g} "
+                    f"(baseline {baseline:g} - offset {offset:g}), but the trace ends at "
+                    f"{plateau:.6g}. The fixed mode pins the asymptote of the fitted curve to the "
+                    "former; check that the value is the lowest point of this recording."
                 )
         output_columns[f"raw_{wavelength}"] = raw
         output_columns[f"offset_adjusted_{wavelength}"] = adjusted

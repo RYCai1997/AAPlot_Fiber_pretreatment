@@ -5,7 +5,14 @@ manual.
 
 ## 2026-10-29
 
-- The bleaching correction is now additive and the **Fitting Baseline** defines F0:
+- The **Fitting Baseline** is now read as the lowest point of the trace after bleaching (the
+  plateau the signal decays to), entered in raw counts, and the correction is stated as
+  `corrected = raw − fitted + (fitting baseline − offset)` — the same expression as
+  `F0 + [(raw − offset) − F(t)]`, which is how it is evaluated. The corrected trace therefore
+  sits on the minimum the user measured, and because that number is also the asymptote of the
+  fit, `fixed` mode now means exactly "the baseline is the minimum I measured" and the seed for
+  `fit_constant` is the right order of magnitude.
+- The bleaching correction is additive and the **Fitting Baseline** defines F0:
   `corrected = F0 + [(raw − offset) − F(t)]`, with `F0 = baseline − offset`. The fitted decay is
   subtracted in counts, the corrected trace sits on the fluorescence the user declared, and F0 is
   the denominator of dF/F0 both for the whole trace and for every event trial. Editing the
