@@ -239,7 +239,8 @@ class FitWindow:
         ttk.Label(left, text="Bleaching model").pack(anchor="w")
         self.model_box = ttk.Combobox(
             left, textvariable=self.model_var,
-            values=["linear", "single_exponential", "double_exponential", "penalized"], state="readonly",
+            values=["none", "linear", "single_exponential", "double_exponential", "penalized"],
+            state="readonly",
         )
         self.model_box.pack(fill=tk.X, pady=(0, 7))
         self.model_box.bind("<<ComboboxSelected>>", self.invalidate_preview)
@@ -252,6 +253,23 @@ class FitWindow:
         beta_entry.bind("<KeyRelease>", self.invalidate_preview)
         ttk.Label(pls_row, text="used by the PLS fit only").pack(side=tk.LEFT)
         ttk.Label(left, text="RWD default 8; smaller keeps the fit closer to the data trend.",
+                  style="Hint.TLabel", wraplength=250).pack(anchor="w", pady=(0, 5))
+        ttk.Label(left, text="PLS smoothing window (s, blank = auto)").pack(anchor="w", pady=(4, 0))
+        smoothing_row = ttk.Frame(left)
+        smoothing_row.pack(fill=tk.X, pady=(0, 5))
+        current_window = config.fit_smoothing.get(channel)
+        self.smoothing_var = tk.StringVar(
+            value="" if current_window is None else f"{float(current_window):g}")
+        smoothing_entry = ttk.Entry(smoothing_row, textvariable=self.smoothing_var, width=6)
+        smoothing_entry.pack(side=tk.LEFT, padx=(0, 4))
+        smoothing_entry.bind("<KeyRelease>", self.invalidate_preview)
+        ttk.Label(smoothing_row, text="how slow the baseline must be").pack(side=tk.LEFT)
+        ttk.Label(left, text="The fit may follow fluctuations slower than this and nothing faster, "
+                             "so a response shorter than the window stays in the trace. Auto keeps "
+                             "the built-in choice, never finer than 15 s.",
+                  style="Hint.TLabel", wraplength=250).pack(anchor="w", pady=(0, 5))
+        ttk.Label(left, text="none = no bleaching correction: the offset is still removed, the "
+                             "decay is not, so the trace keeps its own trend.",
                   style="Hint.TLabel", wraplength=250).pack(anchor="w", pady=(0, 5))
         ttk.Label(left, text="The fitting baseline is the lowest point of the trace after "
                              "bleaching, offset included; F0 = baseline - offset is where the "
@@ -423,13 +441,16 @@ class FitWindow:
                     f"A2={parameters['amplitude_2']:.6g}, tau2={parameters['tau_2_s']:.6g}s")
         elif model == "single_exponential":
             text = f"A={parameters['amplitude']:.6g}, tau={parameters['tau_s']:.6g}s"
+        elif model == "none":
+            text = "no bleaching correction (offset only)"
         elif model == "penalized":
             text = (f"beta={parameters.get('beta', float('nan')):.4g}, "
                     f"lambda={parameters.get('lambda', float('nan')):.4g} (internal), "
                     f"iterations={int(parameters.get('iterations', 0))}\n"
                     f"fit points={int(parameters.get('fit_points', 0)):,}"
                     f"{' (downsampled)' if parameters.get('downsampled') else ''}, "
-                    f"knots={len(parameters.get('curve_knots_t') or [])}")
+                    f"knots={len(parameters.get('curve_knots_t') or [])}"
+                    f"\nfollows drift slower than ~{parameters.get('cutoff_period_s', float('nan')):.3g} s")
         else:
             text = f"slope={parameters.get('slope_per_s', float('nan')):.6g}/s"
         if "fitted_constant" in parameters:
@@ -496,7 +517,8 @@ class FitWindow:
 
         def on_ok(_fitted: Any, _parameters: dict[str, Any]) -> None:
             self.on_accept(self.channel, list(self.regions), self.signature(), self.selected_model,
-                           self.selected_baseline_mode, self.selected_beta(), self.selected_lambda())
+                           self.selected_baseline_mode, self.selected_beta(), self.selected_lambda(),
+                           self.selected_smoothing())
             self.window.destroy()
 
         self.start_async_fit(mask, on_ok)
@@ -522,6 +544,17 @@ class FitWindow:
         except ValueError:
             value = PLS_DEFAULT_BETA
         return float(np.clip(value, PLS_MIN_BETA, PLS_MAX_BETA))
+
+    def selected_smoothing(self) -> float | None:
+        """PLS smoothing window in seconds; blank keeps the automatic choice."""
+        text = self.smoothing_var.get().strip()
+        if not text:
+            return None
+        try:
+            value = float(text)
+        except ValueError:
+            return None
+        return float(value) if np.isfinite(value) and value > 0 else None
 
     def selected_lambda(self) -> float | None:
         """Smoothing is internal, like RWD; the fit falls back to its own default."""
@@ -681,6 +714,7 @@ class PretreatmentApp:
         self.fit_baseline_modes: dict[str, str | None] = {wavelength: "fit_constant" for wavelength in WAVELENGTHS}
         self.fit_betas: dict[str, float | None] = {wavelength: None for wavelength in WAVELENGTHS}
         self.fit_lambdas: dict[str, float | None] = {wavelength: None for wavelength in WAVELENGTHS}
+        self.fit_smoothing: dict[str, float | None] = {wavelength: None for wavelength in WAVELENGTHS}
         self.recording_channels: dict[str, list[str]] = {}
         self.available_wavelengths: list[str] = []
         self.active_source_channel = "CH1"
@@ -899,8 +933,15 @@ class PretreatmentApp:
                                         pady=(0, 6)); row += 1
         row = self.add_time_entry(data_tab, row, "Exclude Before Marker", "estimate_exclude_before")
         row = self.add_time_entry(data_tab, row, "Exclude After Marker", "estimate_exclude_after")
+        self.fit_excludes_markers_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(data_tab, text="Keep these windows out of the bleaching fit",
+                        variable=self.fit_excludes_markers_var,
+                        command=self.fit_exclusions_changed).grid(
+                            row=row, column=0, columnspan=2, sticky="w"); row += 1
         ttk.Label(data_tab, text="Every marker is excluded on both sides before the weight is "
-                                 "fitted. Defaults: 5 before, 60 after.",
+                                 "fitted, and out of the bleaching fit when the box is ticked, so a "
+                                 "response is not absorbed by the baseline it is measured against. "
+                                 "Defaults: 5 s before, 60 s after.",
                   style="Hint.TLabel", wraplength=350, justify="left").grid(
                       row=row, column=0, columnspan=2, sticky="w", pady=(0, 6)); row += 1
         ttk.Button(data_tab, text="Apply Correction", command=self.apply_processing, style="Accent.TButton").grid(row=row, column=0, columnspan=2, sticky="ew", pady=(8, 3)); row += 1
@@ -1389,6 +1430,7 @@ class PretreatmentApp:
         self.fit_baseline_modes = {wavelength: "fit_constant" for wavelength in WAVELENGTHS}
         self.fit_betas = {wavelength: None for wavelength in WAVELENGTHS}
         self.fit_lambdas = {wavelength: None for wavelength in WAVELENGTHS}
+        self.fit_smoothing = {wavelength: None for wavelength in WAVELENGTHS}
         self.recording_channels = {}
         self.available_wavelengths = []
         self.active_source_channel = "CH1"
@@ -1420,6 +1462,19 @@ class PretreatmentApp:
         if message is not None:
             self.vars["event_status"].set(message)
 
+    def fit_exclusion_windows(self) -> tuple[tuple[float, float], ...]:
+        """Marker windows to keep out of the bleaching fits, or () when the option is off."""
+        if not getattr(self, "fit_excludes_markers_var", None) or not self.fit_excludes_markers_var.get():
+            return ()
+        before = max(0.0, self.time_seconds("estimate_exclude_before", 5.0)) / 60.0
+        after = max(0.0, self.time_seconds("estimate_exclude_after", 60.0)) / 60.0
+        windows = []
+        for marker in self.markers:
+            start = float(marker["time_min"]) - before
+            end = float(marker["time_min"]) + after
+            windows.append((round(start, 6), round(end, 6)))
+        return tuple(sorted(set(windows)))
+
     def current_config(self) -> ProcessingConfig:
         smooth_seconds = self.smoothing_seconds()
         wavelengths = list(self.available_wavelengths)
@@ -1446,6 +1501,8 @@ class PretreatmentApp:
             fit_baseline_modes={value: self.fit_baseline_modes[value] for value in wavelengths},
             fit_betas={value: self.fit_betas[value] for value in wavelengths},
             fit_lambdas={value: self.fit_lambdas[value] for value in wavelengths},
+            fit_smoothing={value: self.fit_smoothing[value] for value in wavelengths},
+            exclusion_windows=self.fit_exclusion_windows(),
             source_channel=self.source_channel_var.get(),
         )
         if config.range_end_min <= config.range_start_min:
@@ -1785,6 +1842,16 @@ class PretreatmentApp:
             f"marker); matched scale is {matched:.4g}.{note}"
         )
 
+    def fit_exclusions_changed(self) -> None:
+        """Mark the shown correction stale when the fit exclusions are switched."""
+        if self.processed is None:
+            self.sync_reference_weight_state()
+            return
+        self.vars["status"].set(
+            "The bleaching fit exclusions changed. Click Apply Correction to refit the baseline "
+            "with the marker windows kept out (or without them)."
+        )
+
     def markers_for_reference_check(self) -> tuple[float, ...]:
         """Event times the reference check should look at: the selected ones, else all."""
         selected = self.selected_event_markers()
@@ -1972,6 +2039,7 @@ class PretreatmentApp:
             fit_regions={value: list(self.fit_regions[value]) for value in wavelengths},
             fit_models={value: self.fit_models[value] for value in wavelengths},
             fit_baseline_modes={value: self.fit_baseline_modes[value] for value in wavelengths},
+            exclusion_windows=self.fit_exclusion_windows(),
             source_channel=self.source_channel_var.get(),
         )
 
@@ -2142,6 +2210,7 @@ class PretreatmentApp:
             baseline_mode = config.fit_baseline_modes.get(channel) or "fit_constant"
             beta = config.fit_betas.get(channel)
             lam = config.fit_lambdas.get(channel)
+            smoothing = config.fit_smoothing.get(channel)
             # The key has to match the one process_data builds, which uses the
             # offset-subtracted baseline F0 rather than the raw entry.
             effective = effective_baseline(float(config.baselines[channel]),
@@ -2152,6 +2221,8 @@ class PretreatmentApp:
                 [tuple(region) for region in config.fit_regions.get(channel) or []],
                 config.range_start_min, config.range_end_min,
                 None if beta is None else float(beta), None if lam is None else float(lam),
+                tuple(config.exclusion_windows) or None,
+                None if smoothing is None else float(smoothing),
             )
             stored = copy.deepcopy(parameters)
             stored["model"] = model
@@ -2183,6 +2254,7 @@ class PretreatmentApp:
                 self.fit_baseline_modes[channel] = config.fit_baseline_modes.get(channel) or "fit_constant"
                 self.fit_betas[channel] = config.fit_betas.get(channel)
                 self.fit_lambdas[channel] = config.fit_lambdas.get(channel)
+                self.fit_smoothing[channel] = config.fit_smoothing.get(channel)
                 self.vars[f"fit{channel}_status"].set(
                     f"{len(self.fit_regions[channel])} region(s) | {self.fit_models[channel]} | "
                     f"{self.fit_baseline_modes[channel]} (restored)"
@@ -2407,6 +2479,7 @@ class PretreatmentApp:
         self.fit_baseline_modes = {wavelength: "fit_constant" for wavelength in WAVELENGTHS}
         self.fit_betas = {wavelength: None for wavelength in WAVELENGTHS}
         self.fit_lambdas = {wavelength: None for wavelength in WAVELENGTHS}
+        self.fit_smoothing = {wavelength: None for wavelength in WAVELENGTHS}
         for wavelength in WAVELENGTHS:
             self.vars[f"fit{wavelength}_status"].set("Not set")
         if self.folder is not None:
@@ -2429,6 +2502,7 @@ class PretreatmentApp:
     def accept_fit_regions(
         self, channel: str, regions: list[tuple[float, float]], signature: tuple[Any, ...], model: str,
         baseline_mode: str, beta: float | None = None, lam: float | None = None,
+        smoothing: float | None = None,
     ) -> None:
         self.fit_regions[channel] = regions
         self.fit_signatures[channel] = signature
@@ -2436,9 +2510,13 @@ class PretreatmentApp:
         self.fit_baseline_modes[channel] = baseline_mode
         self.fit_betas[channel] = beta
         self.fit_lambdas[channel] = lam
+        self.fit_smoothing[channel] = smoothing
         summary = f"{len(regions)} region(s) | {model} | {baseline_mode}"
-        if model == "penalized" and beta is not None:
-            summary += f" | beta={float(beta):g}"
+        if model == "penalized":
+            if beta is not None:
+                summary += f" | beta={float(beta):g}"
+            summary += (" | window=auto" if smoothing is None
+                        else f" | window={float(smoothing):g} s")
         self.vars[f"fit{channel}_status"].set(summary)
         self.vars["status"].set(f"{channel} fitting regions and model saved.")
 
@@ -2457,6 +2535,9 @@ class PretreatmentApp:
         try:
             config = self.current_config()
             for channel in config.wavelengths:
+                if (self.fit_models[channel] or config.fit_model) == "none":
+                    # Nothing is fitted, so there is no region to confirm.
+                    continue
                 if not self.fit_regions[channel]:
                     raise ValueError(f"Select and confirm fitting regions in the {channel} fitting window first.")
                 if self.fit_signatures[channel] != self.expected_signature(channel, config):

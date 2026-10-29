@@ -84,7 +84,7 @@ reinterpreted as an already-subtracted level: that guess would silently produce 
 
 ## Fitting models
 
-- The fitting window supports linear, single-exponential, double-exponential and PLS
+- The fitting window supports **none**, linear, single-exponential, double-exponential and PLS
   (`penalized`) models, with one or more regions that can be dragged or resized; use
   **Add Region** and **Delete Selected Region** to edit the set. **Preview Fit** draws the
   candidate curve and reports its parameters, RMSE and BIC; **Use These Regions** confirms the
@@ -114,6 +114,16 @@ reinterpreted as an already-subtracted level: that guess would silently produce 
   (`Offset used: 410=5000, 470=5000`). **Calculate Event dF/F0 & Z-score**, **Calculate dF/F0
   & Z-score** and **Estimate** apply pending edits themselves before they run, so a changed
   offset always reaches these results.
+
+## No correction (`none`)
+
+`none` removes the offset and nothing else: `corrected = raw − offset`. The trace keeps its
+decay, so dF/F0 drifts with the bleaching and every percentage depends on where the baseline
+window sits. It exists for recordings without measurable bleaching, and as a reference point
+for how much a fitted baseline is actually doing: switching between `none` and a model on the
+same data shows the size of the correction. The model needs no regions and no confirmation —
+**Apply Correction** accepts it directly — and the fitting window prints
+`no bleaching correction (offset only)`.
 
 ## PLS fit
 

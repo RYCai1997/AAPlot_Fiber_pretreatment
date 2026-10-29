@@ -41,6 +41,12 @@ class ProcessingConfig:
     # Penalised-least-squares settings, per wavelength (used when the model is "penalized").
     fit_betas: dict[str, float | None] = field(default_factory=dict)
     fit_lambdas: dict[str, float | None] = field(default_factory=dict)
+    # PLS smoothing window in seconds, per wavelength. None keeps the automatic choice, which is
+    # never finer than PLS_MIN_CUTOFF_SECONDS.
+    fit_smoothing: dict[str, float | None] = field(default_factory=dict)
+    # Windows (minutes, absolute) that never enter a bleaching fit: the marker windows, so a
+    # response is not absorbed by the baseline it is measured against.
+    exclusion_windows: tuple[tuple[float, float], ...] = ()
     source_channel: str = "CH1"
 
 
@@ -78,6 +84,9 @@ PLS_KNOT_COUNT = 200
 # generous and the tolerance is stated relative to the span of the log signal.
 PLS_MAX_ITERATIONS = 100
 PLS_TOLERANCE = 1e-5
+# The baseline may not be smoother than this, whatever the legacy penalty works out to: below it
+# the fit starts following responses instead of the decay, and the correction removes them.
+PLS_MIN_CUTOFF_SECONDS = 15.0
 
 # Per-start and final budgets of the historical implementation, kept identical
 # so that a converged solution does not change (only the screening stage is new).
@@ -330,6 +339,7 @@ def fit_bleaching(
     baseline_mode: str = "fixed",
     beta: float = PLS_DEFAULT_BETA,
     lam: float = PLS_DEFAULT_LAMBDA,
+    smoothing_seconds: float | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Fit one channel using only selected regions.
 
@@ -342,6 +352,38 @@ def fit_bleaching(
     """
     if baseline_mode not in {"fixed", "fit_constant"}:
         raise ValueError(f"Unknown baseline fitting mode: {baseline_mode}")
+    if model == "none":
+        # No bleaching correction. The offset is still removed upstream, and the declared level is
+        # returned as a flat curve, so the caller's "place the trace on F0" step becomes the
+        # identity: the corrected channel is (raw - offset) itself, decay included.
+        x_none = np.asarray(time_s, float) - float(time_s[0])
+        y_none = np.asarray(values, float)
+        valid_none = np.asarray(fit_mask, bool) & np.isfinite(x_none) & np.isfinite(y_none)
+        if valid_none.sum() < 20:
+            raise ValueError("The fitting regions contain fewer than 20 valid points in total.")
+        level = float(baseline)
+        return np.full(y_none.shape, level, float), {
+            "model": "none",
+            "baseline_mode": baseline_mode,
+            "fixed_baseline": level,
+            "fitted_constant": level,
+            "fit_samples": int(valid_none.sum()),
+            "final_refinement_samples": int(valid_none.sum()),
+            "score_samples": int(valid_none.sum()),
+            "cost": 0.0,
+            "rss_selected": 0.0,
+            "rmse_selected": float("nan"),
+            "bic_selected": float("nan"),
+            "aicc_selected": float("nan"),
+            "optimizer_success": True,
+            "optimizer_status": 0,
+            "optimizer_message": "no bleaching correction",
+            "optimizer_nfev": 0,
+            "optimizer_optimality": 0.0,
+            "optimizer_active_mask": [0, 0],
+            "correction_disabled": True,
+            "fit_warnings": [],
+        }
     x = np.asarray(time_s, float) - float(time_s[0])
     y = np.asarray(values, float)
     valid = np.asarray(fit_mask, bool) & np.isfinite(x) & np.isfinite(y)
@@ -355,7 +397,8 @@ def fit_bleaching(
     if model == "penalized":
         # A global smoother, so every sample is used rather than only the regions;
         # the regions still decide which samples score the fit.
-        fitted, parameters = fit_penalized_baseline(x, y, beta=beta, lam=lam)
+        fitted, parameters = fit_penalized_baseline(
+            x, y, beta=beta, lam=lam, smoothing_seconds=smoothing_seconds, sample_mask=valid)
         score_indices = valid_indices[sample_indices(len(valid_indices), 2000)]
         residuals = y[score_indices] - fitted[score_indices]
         rss = max(float(np.sum(residuals ** 2)), np.finfo(float).tiny)
@@ -363,7 +406,7 @@ def fit_bleaching(
         parameter_count = 2
         bic = score_n * np.log(rss / score_n) + parameter_count * np.log(score_n)
         aic = score_n * np.log(rss / score_n) + 2 * parameter_count
-        pls_warnings: list[str] = []
+        pls_warnings: list[str] = list(parameters.get("smoothing_warnings") or [])
         if not parameters.get("converged", True):
             pls_warnings.append(
                 f"The PLS reweighting reached the {PLS_MAX_ITERATIONS}-iteration limit; "
@@ -1036,11 +1079,14 @@ def fit_cache_key(
     range_end_min: float,
     beta: float | None = None,
     lam: float | None = None,
+    exclusions: tuple[tuple[float, float], ...] | None = None,
+    smoothing: float | None = None,
 ) -> tuple[Any, ...]:
     """Signature of one channel fit. Two runs share a fit only when it matches."""
     return (data_token, source, column, model, baseline_mode, offset, baseline,
             tuple(tuple(region) for region in regions),
-            float(range_start_min), float(range_end_min), beta, lam)
+            float(range_start_min), float(range_end_min), beta, lam,
+            tuple(exclusions) if exclusions else None, smoothing)
 
 
 def process_data(
@@ -1093,14 +1139,28 @@ def process_data(
         adjusted = raw - offset
         regions = [tuple(region) for region in config.fit_regions.get(wavelength, [])]
         mask = region_mask(time_min, regions)
+        excluded = 0
+        if config.exclusion_windows:
+            window_mask = np.zeros(time_min.shape, bool)
+            for start, end in config.exclusion_windows:
+                window_mask |= (time_min >= float(start)) & (time_min <= float(end))
+            available = int((mask & np.isfinite(adjusted)).sum())
+            excluded = int((mask & window_mask).sum())
+            if excluded and available - excluded >= max(200, int(0.25 * available)):
+                mask = mask & ~window_mask
+            else:
+                excluded = 0
         model = config.fit_models.get(wavelength) or config.fit_model
         baseline_mode = config.fit_baseline_modes.get(wavelength) or "fit_constant"
         beta = config.fit_betas.get(wavelength)
         lam = config.fit_lambdas.get(wavelength)
+        smoothing = config.fit_smoothing.get(wavelength)
         cache_key = fit_cache_key(data_token, source, column, model, baseline_mode, offset, fit_baseline,
                                   regions, config.range_start_min, config.range_end_min,
                                   None if beta is None else float(beta),
-                                  None if lam is None else float(lam))
+                                  None if lam is None else float(lam),
+                                  tuple(config.exclusion_windows) or None,
+                                  None if smoothing is None else float(smoothing))
         cached = cache.get(cache_key) if cache is not None else None
         if cached is not None:
             fitted, parameters = cached[0], copy.deepcopy(cached[1])
@@ -1110,7 +1170,9 @@ def process_data(
                 time_s, adjusted, fit_baseline, model, mask, baseline_mode,
                 beta=PLS_DEFAULT_BETA if beta is None else float(beta),
                 lam=PLS_DEFAULT_LAMBDA if lam is None else float(lam),
+                smoothing_seconds=None if smoothing is None else float(smoothing),
             )
+            parameters["excluded_samples"] = int(excluded)
             parameters["fit_reused_from_cache"] = False
             if cache is not None:
                 if len(cache) >= 12:
@@ -1157,7 +1219,11 @@ def process_data(
                 f"{first_bad:.3f} min); they are left out of the fit and the corrected trace "
                 "is a gap there"
             )
-        if baseline_mode == "fixed" and float(fit_baseline) != 0.0:
+        if model == "none":
+            # Nothing is pinned and nothing is subtracted, so the trace keeps its own level.
+            parameters["corrected_note"] = ("No bleaching correction: the corrected trace is "
+                                            "(raw - offset), so any decay remains in it")
+        if model != "none" and baseline_mode == "fixed" and float(fit_baseline) != 0.0:
             tail = adjusted[np.isfinite(adjusted)][-max(20, int(0.05 * np.isfinite(adjusted).sum())):]
             plateau = float(np.median(tail)) if tail.size else float("nan")
             if np.isfinite(plateau) and plateau != 0.0 and not 0.95 <= float(fit_baseline) / plateau <= 1.05:
@@ -1547,6 +1613,18 @@ def _regions_from_saved(raw: Any) -> list[tuple[float, float]]:
     return regions
 
 
+def _windows_from_saved(raw: Any) -> tuple[tuple[float, float], ...]:
+    windows: list[tuple[float, float]] = []
+    for window in raw or []:
+        try:
+            start, end = float(window[0]), float(window[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if end > start:
+            windows.append((start, end))
+    return tuple(windows)
+
+
 def config_from_saved(payload: dict[str, Any]) -> ProcessingConfig:
     """Rebuild a ProcessingConfig from an exported parameters file.
 
@@ -1580,6 +1658,8 @@ def config_from_saved(payload: dict[str, Any]) -> ProcessingConfig:
         fit_baseline_modes={key: value for key, value in (processing.get("fit_baseline_modes") or {}).items()},
         fit_betas={key: _as_float(value) for key, value in (processing.get("fit_betas") or {}).items()},
         fit_lambdas={key: _as_float(value) for key, value in (processing.get("fit_lambdas") or {}).items()},
+        fit_smoothing={key: _as_float(value) for key, value in (processing.get("fit_smoothing") or {}).items()},
+        exclusion_windows=_windows_from_saved(processing.get("exclusion_windows")),
         source_channel=str(processing.get("source_channel") or default.source_channel),
     )
 
@@ -1590,6 +1670,8 @@ def fit_penalized_baseline(
     beta: float = PLS_DEFAULT_BETA,
     lam: float = PLS_DEFAULT_LAMBDA,
     max_points: int = PLS_MAX_POINTS,
+    smoothing_seconds: float | None = None,
+    sample_mask: np.ndarray | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Lower-envelope bleaching baseline by iteratively reweighted penalised LS.
 
@@ -1600,9 +1682,12 @@ def fit_penalized_baseline(
     representable by a single smoothing strength.
 
     ``beta`` sharpens the asymmetric weighting (higher = closer to the lower
-    envelope) and ``lam`` sets the smoothing strength; both are clamped to the
-    stable range. Long recordings are decimated before fitting and the result is
-    interpolated back, which is the down-sampling variant of the same algorithm.
+    envelope). The smoothing strength follows ``smoothing_seconds`` when it is given: the
+    penalty is set so that fluctuations shorter than that period are smoothed away, which is
+    what keeps a slow drift in the fit and a fast response out of it. Without it the legacy
+    ``lam`` is used, whose cutoff depends on the recording length. Long recordings are
+    decimated before fitting and the result is interpolated back, which is the down-sampling
+    variant of the same algorithm.
     """
     x_full = np.asarray(time_s, float)
     x = x_full - float(x_full[0])
@@ -1618,12 +1703,37 @@ def fit_penalized_baseline(
 
     index = sample_indices(x.size, max_points)
     grid_x, grid_y = x[index], y[index]
+    # Samples the caller excluded keep their place on the grid - the penalty still shapes the
+    # curve across them, so the baseline continues smoothly instead of being bridged by a
+    # straight chord - but they lose their say in the fit, so a response cannot drag the baseline.
+    excluded_grid = np.zeros(index.size, bool)
+    if sample_mask is not None:
+        exclude = ~np.asarray(sample_mask, bool)[keep]
+        excluded_grid = exclude[index]
+        if int((~excluded_grid).sum()) < 50:
+            raise ValueError("Fewer than 50 samples are left for the PLS fit after the "
+                             "excluded windows.")
     floor = max(float(np.percentile(grid_y, 99)) * 1e-3, 1e-6)
     logged = np.log(np.maximum(grid_y, floor))
     n = logged.size
     sigma = float(np.median(np.abs(np.diff(logged)))) / 0.6745 / np.sqrt(2.0)
     sigma = max(sigma, 1e-9)
-    lam_scaled = lam * (n / 1000.0) ** 2
+    # The Whittaker penalty attenuates a frequency f by 1 / (1 + lambda * (2 sin(pi f dt))^4), so
+    # half power sits at lambda = (T / (2 pi dt))^4 for a period T. Inverting that lets the user
+    # say "the baseline may follow drift slower than 120 s" instead of choosing a penalty.
+    grid_dt = float(np.median(np.diff(grid_x))) if n > 1 else 1.0
+    grid_dt = grid_dt if np.isfinite(grid_dt) and grid_dt > 0 else 1.0
+    legacy_cutoff = 2.0 * np.pi * grid_dt * max(lam * (n / 1000.0) ** 2, 1e-12) ** 0.25
+    if smoothing_seconds is not None and float(smoothing_seconds) > 0:
+        window = float(np.clip(float(smoothing_seconds), 2.0 * grid_dt, 1e6))
+        cutoff_period = window
+    else:
+        # Automatic: the legacy penalty, but never finer than the band a response lives in. On a
+        # short recording the legacy value collapses to a few seconds, and a smoother that fine
+        # follows the response itself, so the correction removes it.
+        window = None
+        cutoff_period = max(PLS_MIN_CUTOFF_SECONDS, legacy_cutoff)
+    lam_scaled = float(np.clip((cutoff_period / (2.0 * np.pi * grid_dt)) ** 4, 1e-6, 1e14))
 
     difference = sparse.diags([1.0, -2.0, 1.0], [0, 1, 2], shape=(n - 2, n), format="csr")
     penalty = lam_scaled * (difference.T @ difference)
@@ -1640,6 +1750,8 @@ def fit_penalized_baseline(
     for iterations in range(1, PLS_MAX_ITERATIONS + 1):
         residual = logged - fitted_log
         weights = np.maximum(np.exp(-beta * np.maximum(residual, 0.0) / sigma), 1e-8)
+        if excluded_grid.any():
+            weights[excluded_grid] = 1e-8
         updated = solve(weights)
         step = float(np.max(np.abs(updated - fitted_log)))
         fitted_log = updated
@@ -1648,6 +1760,19 @@ def fit_penalized_baseline(
             break
 
     fitted_grid = np.exp(fitted_log)
+    smoothing_warnings: list[str] = []
+    if window is not None:
+        # A window longer than the decay cannot follow it; the asymmetric reweighting then pulls
+        # the curve below the data and the correction lifts the whole trace. Say so instead of
+        # handing over a quietly broken baseline.
+        tail = slice(max(0, int(0.8 * n)), n)
+        drift = float(np.mean(grid_y[tail] - fitted_grid[tail])) / max(float(np.mean(grid_y[tail])), 1e-9)
+        if abs(drift) > 0.02:
+            smoothing_warnings.append(
+                f"The smoothing window of {window:.0f} s is too long for this recording: the "
+                f"baseline ends up {drift * 100:+.1f}% away from the data, so it cannot follow the "
+                "decay. Shorten it (a third of the decay time is a good start) or leave it blank."
+            )
     # The fit only sees finite samples, but the returned curve has to line up with the
     # caller's arrays: a single empty cell must not change the length of the result.
     fitted = np.full(total, np.nan)
@@ -1663,6 +1788,10 @@ def fit_penalized_baseline(
         "converged": bool(converged),
         "tolerance": float(PLS_TOLERANCE),
         "fit_points": int(n),
+        "smoothing_seconds": None if window is None else float(window),
+        "cutoff_period_s": float(cutoff_period),
+        "legacy_cutoff_s": float(legacy_cutoff),
+        "smoothing_warnings": smoothing_warnings,
         "dropped_samples": dropped,
         "downsampled": bool(n < x.size),
         "curve_knots_t": [float(value) for value in grid_x[knot_index]],
@@ -1686,6 +1815,8 @@ def fitted_curve_from_parameters(parameters: dict[str, Any], time_s: np.ndarray)
     if constant is None:
         constant = parameters.get("fixed_baseline", 0.0)
     constant = float(constant)
+    if model == "none":
+        return np.full(x.shape, constant, float)
     if model == "linear":
         return constant + float(parameters["slope_per_s"]) * x
     if model == "single_exponential":
@@ -1774,13 +1905,18 @@ def compare_configs(
             _describe_regions(current.fit_regions.get(channel)))
         if (saved.fit_models.get(channel) or saved.fit_model) == "penalized":
             add(channel, "PLS beta", saved.fit_betas.get(channel), current.fit_betas.get(channel))
-            add(channel, "PLS lambda", saved.fit_lambdas.get(channel), current.fit_lambdas.get(channel))
+            add(channel, "PLS smoothing window", saved.fit_smoothing.get(channel),
+                current.fit_smoothing.get(channel))
+        add(channel, "excluded windows",
+            f"{len(saved.exclusion_windows)} window(s)" if saved.exclusion_windows else "none",
+            f"{len(current.exclusion_windows)} window(s)" if current.exclusion_windows else "none")
     return rows
 
 
 def changed_fit_channels(saved: ProcessingConfig, current: ProcessingConfig) -> set[str]:
     """Channels whose fit inputs differ, i.e. the channels that must be fitted again."""
-    scope_keys = {"offset", "fitting baseline", "fit model", "baseline mode", "fitting regions"}
+    scope_keys = {"offset", "fitting baseline", "fit model", "baseline mode", "fitting regions",
+                  "excluded windows", "PLS smoothing window"}
     changed = {row["scope"] for row in compare_configs(saved, current)
                if row["scope"] != "global" and row["parameter"] in scope_keys}
     if (abs(saved.range_start_min - current.range_start_min) > RANGE_TOLERANCE_MIN

@@ -48,7 +48,9 @@ tab. Edits are kept in memory and written to `markers_working_copy.csv` on expor
    the **Valid Data Range**, then enter each visible **Offset** and **Fitting Baseline**. The
    baseline is the **lowest point of the trace after bleaching** — the plateau the signal
    decays to — read off the **raw** plot, so it still contains the offset: the program subtracts
-   the offset from it and puts the corrected trace on that level. dF/F0 is then normalised by the
+   the offset from it and puts the corrected trace on that level, so leave **Keep these windows
+   out of the bleaching fit** ticked and the marker windows cannot pull the baseline towards the
+   responses. dF/F0 is then normalised by the
    mean of the corrected trace inside the baseline window, so the two fields act through the
    level they set. A baseline that is not larger than the offset is rejected with an error naming
    the channel, because nothing would be left of it once the offset is removed.

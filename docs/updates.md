@@ -5,6 +5,25 @@ manual.
 
 ## 2026-10-29
 
+- Added a **`none`** fitting model: the offset is removed and nothing else, so `corrected =
+  raw − offset`. It needs no fitting regions and is accepted by **Apply Correction** straight
+  away.
+- The PLS baseline now has a stated time scale and a **smoothing window** field. The penalty is
+  derived from a period — the fit may follow fluctuations slower than that period and nothing
+  faster — and the value is printed in the preview (`follows drift slower than ~15 s`). With the
+  legacy penalty that period was proportional to the recording length: 2 s on a 200 s recording,
+  12 s on a 20 min one, so on short recordings the baseline followed the responses themselves.
+  An 8 s response of 300 counts was recovered as 5 % of its size on a 200 s recording and as
+  105 % once the period was held at 15 s. The automatic value is now never finer than 15 s;
+  longer recordings keep their previous behaviour. A window typed too long for the decay is
+  reported instead of being applied silently: 40 s on a 200 s recording pulls the baseline 3 %
+  away from the data and the warning says so.
+- Marker windows can be kept **out of the bleaching fit** (a checkbox under the exclusion
+  fields, on by default): every sample inside `Exclude Before/After Marker` loses its say in the
+  baseline fit while still shaping it through the penalty, so a response is not absorbed by the
+  baseline it is measured against. On a 30 s response of 300 counts the fit absorbed 11.5 % of it
+  before and 1.3 % after. The count is written to the fit parameters (`excluded_samples`) and a
+  run with no markers is unchanged.
 - Added **Check Reference Polarity** (Data & Fitting): one pass over the applied correction that
   reports how the reference channel behaves during the events — Pearson correlation overall and
   outside the events, the motion slope fitted with and without the responses, the spread of the
