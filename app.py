@@ -1644,8 +1644,10 @@ class PretreatmentApp:
             self.refresh_markers(); self.analysis_selection_changed()
             if hasattr(self, "restore_button"):
                 self.restore_button.configure(state="normal")
+            gap_note = self.gap_fill_note()
             self.vars["status"].set(
-                f"Data loaded with wavelengths {', '.join(self.available_wavelengths)}. "
+                gap_note
+                + f"Data loaded with wavelengths {', '.join(self.available_wavelengths)}. "
                 "Enter each visible baseline and set its fitting regions, or click "
                 "Restore From Saved JSON to load the settings of an earlier analysis."
             )
@@ -2386,12 +2388,11 @@ class PretreatmentApp:
             ) + "."
         missing = {channel: int(count) for channel, count in
                    ((self.details or {}).get("missing_samples") or {}).items() if count}
-        missing_note = ""
+        missing_note = self.gap_fill_note()
         if missing:
             detail = ", ".join(f"{channel}: {count:,}" for channel, count in sorted(missing.items()))
-            missing_note = (f" Empty or non-numeric cells were skipped ({detail} sample(s)); "
-                            "they show as a gap and are left out of the fit.")
-            record_error(f"missing samples in the recording: {detail}")
+            missing_note += f"{detail} sample(s) in the selected range are still a gap. "
+            record_error(f"unbridged missing samples in the selected range: {detail}")
         self.vars["status"].set(
             f"Correction complete: {len(self.processed):,} points.{offset_note}{missing_note}{scope} "
             "The current display remains unsmoothed and not downsampled. Apply display processing from "
@@ -2870,6 +2871,24 @@ class PretreatmentApp:
         self.initialize_hover_artists(); self.initialize_box_zoom()
         self.update_scale_readouts(); self.canvas.draw_idle()
         self.report_plot_mismatches()
+
+    def gap_fill_note(self) -> str:
+        """One short sentence about the empty cells that were bridged while loading."""
+        fills = dict((self.data.attrs.get("gap_fills") if self.data is not None else None) or {})
+        parts = []
+        for column, info in sorted(fills.items()):
+            filled = int(info.get("filled", 0))
+            left = int(info.get("left", 0))
+            if filled:
+                parts.append(f"{filled:,} empty cell{'s' if filled != 1 else ''} in {column} bridged "
+                             "by linear interpolation")
+            if left:
+                parts.append(f"{left:,} cell{'s' if left != 1 else ''} in {column} left as a gap "
+                             f"(longest {int(info.get('longest_left_run', 0))} samples, first at "
+                             f"{float(info.get('first_time_min', 0.0)):.3f} min)")
+        if not parts:
+            return ""
+        return " " + "; ".join(parts) + ". "
 
     def report_plot_mismatches(self) -> None:
         """Surface a trimmed plot series instead of hiding it."""

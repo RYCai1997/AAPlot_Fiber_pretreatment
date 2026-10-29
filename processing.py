@@ -103,6 +103,51 @@ def available_recording_channels(data: pd.DataFrame) -> dict[str, list[str]]:
     }
 
 
+# A run of missing samples shorter than this many samples (about 0.1 s at 30 Hz) is
+# bridged by linear interpolation; longer runs are left as gaps so a real dropout is
+# never hidden.
+GAP_FILL_MAX_SAMPLES = 3
+
+
+def fill_short_gaps(
+    values: np.ndarray,
+    max_run: int = GAP_FILL_MAX_SAMPLES,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Bridge short runs of missing samples, keeping everything else a gap.
+
+    Linear interpolation is used between the neighbouring valid samples, with the nearest
+    valid value held for a run that touches either end. Runs longer than ``max_run`` are
+    left untouched, so a real dropout (a lamp off, a disconnected channel) still shows up
+    instead of being averaged over.
+    """
+    original = np.asarray(values, float)
+    filled = original.copy()
+    missing = ~np.isfinite(original)
+    info: dict[str, Any] = {"filled": 0, "filled_runs": 0, "left": 0,
+                            "longest_filled_run": 0, "longest_left_run": 0}
+    if not missing.any():
+        return filled, info
+    good = ~missing
+    if good.sum() < 2:
+        info["left"] = int(missing.sum())
+        return filled, info
+    index = np.arange(filled.size)
+    bridge = np.interp(index, index[good], original[good])
+    run_starts = np.flatnonzero(missing & np.r_[True, ~missing[:-1]])
+    run_ends = np.flatnonzero(missing & np.r_[~missing[1:], True])
+    for start, end in zip(run_starts, run_ends):
+        length = int(end - start + 1)
+        if length <= max_run:
+            filled[start:end + 1] = bridge[start:end + 1]
+            info["filled"] += length
+            info["filled_runs"] += 1
+            info["longest_filled_run"] = max(info["longest_filled_run"], length)
+        else:
+            info["left"] += length
+            info["longest_left_run"] = max(info["longest_left_run"], length)
+    return filled, info
+
+
 def load_recording(folder: Path) -> tuple[pd.DataFrame, list[dict[str, Any]], str]:
     path = folder / "Fluorescence.csv"
     if not path.exists():
@@ -127,6 +172,23 @@ def load_recording(folder: Path) -> tuple[pd.DataFrame, list[dict[str, Any]], st
     data = data.dropna(subset=["TimeStamp"]).sort_values("TimeStamp").reset_index(drop=True)
     if len(data) < 20:
         raise ValueError("Fewer than 20 valid data points are available.")
+    # One empty cell should not turn into a gap (or a shape mismatch) downstream, so short
+    # runs are bridged here, once, before anything fits or plots the trace.
+    gap_fills: dict[str, dict[str, Any]] = {}
+    time_min = data["TimeStamp"].to_numpy(float) / 60000
+    for column in numeric_columns[1:]:
+        values = data[column].to_numpy(float)
+        if np.isfinite(values).all():
+            continue
+        filled, info = fill_short_gaps(values)
+        if info["filled"]:
+            data[column] = filled
+        if info["filled"] or info["left"]:
+            first_missing = np.flatnonzero(~np.isfinite(values))
+            info["first_time_min"] = float(time_min[first_missing[0]])
+            info["column"] = column
+            gap_fills[column] = info
+    data.attrs["gap_fills"] = gap_fills
 
     markers: list[dict[str, Any]] = []
     events_path = folder / "Events.csv"
@@ -701,6 +763,7 @@ def process_data(
     the full fitting signature matches, so results are identical to a fresh fit.
     ``cancel`` is an optional ``threading.Event``; it is checked between channels.
     """
+    gap_fills = dict(data.attrs.get("gap_fills") or {})
     subset = select_effective_data(data, config)
     time_s = subset["TimeStamp"].to_numpy(float) / 1000
     time_min = time_s / 60
@@ -876,6 +939,7 @@ def process_data(
         **{f"fit_{wavelength}_parameters": fit_parameters[wavelength] for wavelength in wavelengths},
         "missing_samples": {wavelength: int((~np.isfinite(subset[f"{source}-{wavelength}"].to_numpy(float))).sum())
                             for wavelength in wavelengths},
+        "gap_fills": gap_fills,
         "analysis_reference_from_user_baselines": float(analysis_reference),
         "combine": config.combine if reference is not None else None,
         "reference_weight": None if weight_used is None else float(weight_used),

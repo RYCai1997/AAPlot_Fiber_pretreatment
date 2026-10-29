@@ -31,11 +31,16 @@ skipped; the data table starts on the second line.
   the `Name` column.
 - Rows without a valid `TimeStamp` are dropped and the table is sorted by time. At least
   20 valid samples are required.
-- An empty or non-numeric cell in a fluorescence column is kept as a **gap**: the sample is
-  left out of the fit, the corrected trace and every trace derived from it are NaN there,
-  and the status line names the channel and the count (`Empty or non-numeric cells were
-  skipped (470: 1 sample(s))`). Nothing else shifts, so the trace keeps its timestamps and
-  the plots show a one-sample gap instead of a drop to zero.
+- An empty or non-numeric cell in a fluorescence column is **bridged on load**: a run of up
+  to 3 samples (about 0.1 s at 30 Hz) is replaced by the straight line between its
+  neighbours, so a single dropped sample neither breaks the fit nor leaves a hole, and the
+  sample count of the trace never changes. The status line says what was bridged
+  (`1 empty cell in CH1-470 bridged by linear interpolation`), and the count is written to
+  the saved JSON under `fit_details.gap_fills` so the edit stays traceable.
+- Longer runs are **not** bridged: they stay NaN and are reported as a gap
+  (`6 cells in CH1-410 left as a gap (longest 6 samples, first at 0.000 min)`), because a
+  real dropout — lamp off, connector pulled — should not be averaged away. Those samples
+  are left out of the fit and the corrected trace is a gap there.
 
 Markers can be added, deleted, or restored in **Markers (Working Copy)** on the **Data &
 Fitting** tab. Edits are kept in memory and are written to `markers_working_copy.csv` on
@@ -579,6 +584,12 @@ Original input files are read-only and are never modified.
 
 ### 2026-10-29
 
+- Short runs of missing fluorescence samples are now bridged while loading instead of being
+  carried through as a gap: a run of up to 3 samples is interpolated between its neighbours,
+  which is what makes a single empty cell invisible to the fit, the plots and the outputs
+  while keeping the sample count identical. Longer runs stay NaN and are reported, so a real
+  dropout is not hidden. Opening a folder and applying a correction both say in the status
+  line what was bridged and what was left as a gap.
 - Fixed `operands could not be broadcast together with shapes (14062,) (14061,)` when a
   recording held one empty or non-numeric fluorescence cell. The PLS fit dropped the
   non-finite sample internally and returned a curve one sample shorter than the trace, so
