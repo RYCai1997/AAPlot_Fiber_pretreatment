@@ -86,6 +86,22 @@ assuming the noise level is the same in every trial. Each trial row still record
 window gave, and `baseline_dff_n` its sample count. Toggling the box recalculates the event
 analysis immediately and the status line names the pooled value.
 
+### Per-trial Z and average Z
+
+Two summary z curves are computed and both are exported; **Average Z from** decides which one the
+figure draws. Neither choice changes any trial's own z.
+
+| Setting | Column | Meaning |
+|---|---|---|
+| `mean of trials` (default) | `zscore_mean` ± `zscore_sem` | every trial's own z, averaged point by point; same scale as a single trial |
+| `average trace` | `zscore_of_average` | the trial-averaged dF/F0 standardised against that average's own baseline SD; roughly √n_trials larger |
+
+A single trial's z is bounded by that trial's own signal-to-noise ratio, so smoothing the trace
+cannot raise it — a centred smoother shrinks the response along with the noise, and when its
+window reaches into the pre-marker baseline it also biases F0. The average trace is the honest
+route to a larger number: its noise falls as √n. Report which basis a figure uses; the two are not
+interchangeable and must not be pooled in one statistic.
+
 Event CSV files are grouped by marker name: one file per analyzed marker, with the shared
 relative time axis in the first column, one `dF/F0_trialNN` column per trial, one empty
 separator column, then the matching `Z-score_trialNN` columns. When several signals are

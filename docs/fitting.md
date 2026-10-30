@@ -6,31 +6,48 @@ combination (see [channels.md](channels.md)).
 
 ## Bleaching correction
 
+Two forms are available; the **Bleaching Model** control chooses one and both are written into every
+log.
+
 ```
-corrected(t) = raw(t) − F(t) + (fitting baseline − offset)
-             = F0 + [(raw(t) − offset) − F(t)],        F0 = fitting baseline − offset
+additive          corrected(t) = F0 + [(raw(t) − offset) − F(t)]
+multiplicative    corrected(t) = F0 × (raw(t) − offset) / F(t)
+
+                  F0 = fitting baseline − offset
 ```
 
-Both lines are the same expression: the first is how the correction reads, the second is how it
-is evaluated. The fitted bleaching curve is subtracted in counts and the result is put back on
-F0, so the corrected trace sits at the fluorescence the user declared for the minimum of the
-signal.
+They differ in one assumption about what the decay does to a response:
+
+- **additive** — `raw = offset + B(t) + s(t)`. The response is added on top of the decay, so
+  subtracting `B(t)` leaves `F0 + s(t)` and a response keeps the same size however far the trace has
+  faded. This is the right model when the decay comes from the instrument: lamp warm-up, a drifting
+  LED supply, a cable moving in the light path.
+- **multiplicative** — `raw = offset + B(t)·(1 + s(t))`. The response is a *fraction of the
+  fluorescence that is still excitable*, so it shrinks as the probe bleaches. Dividing by `B(t)`
+  leaves `F0·s(t)`, and two responses of the same relative size come out the same at 1 min and at
+  20 min. This is the right model when the decay is the probe's own photobleaching.
+
+Worked example, both responses truly 10% in the multiplicative sense, decay from `4·10⁴` to `1.2·10⁴`
+counts over the recording:
+
+| Model | response at 1.7 min | response at 16.7 min |
+| --- | --- | --- |
+| additive | 33.3% | 12.2% |
+| multiplicative | 10.0% | 10.0% |
 
 - `raw(t)` is the recorded fluorescence of that wavelength.
 - `offset` is the instrument reading with no sample attached — fluorescence that carries no
   biological information. It is subtracted **before** the fit, so it can never be re-absorbed
   by the fitted constant.
 - `F(t)` is the independently fitted bleaching curve, evaluated over the whole trace. It is
-  **subtracted**, in counts, so the corrected trace keeps the units of the recording.
+  subtracted (additive) or divided out (multiplicative), never replaced by a level at `t₀`.
 - `F0` is the fluorescence the user declared for the trace. It sets the level of the corrected
   trace and is the denominator of dF/F0.
 
-Subtracting rather than dividing is what lets F0 stay a free scale: the numerator carries no
-factor of F0, so dF/F0 = `100 × (corrected − level) / F0` really does scale as `1 / F0`. If the
-decay were divided out and the result multiplied by F0, F0 would cancel against itself and the
-field would have no effect — which is exactly what it used to do.
+In both forms `F0` stays an explicit scale rather than a factor that cancels against itself, so
+dF/F0 = `100 × (corrected − level) / F0` still responds to the field.
 
-Note what is **not** in the formula: the fitted level at t₀. Anchoring on the first sample
+Note what is **not** in either formula: the fitted level at `t₀`. Anchoring on the first sample
 makes the scale depend on where the recording happened to start, on the fastest decay component
 and on the noise of a single point, so it is not used anywhere. The scale is the declared F0
 instead, which is reproducible and the same for every trace of a recording.
@@ -40,14 +57,14 @@ Properties of this form:
 | Question | Behaviour |
 | --- | --- |
 | Where does the corrected trace sit? | On `F0`, the fluorescence that was entered for that channel |
-| Is the bleaching removed? | Yes — divided out at every sample, so the transient itself is un-bleached, not merely shifted |
+| Is the bleaching removed? | Yes — at every sample. Additive: subtracted in counts. Multiplicative: divided out, so the transient itself is un-bleached, not merely shifted |
 | Does the offset matter? | Yes — it is removed from the trace *and* from F0, so it has to be right |
-| Does the transient amplitude depend on when it occurred? | No — the same relative response at 1 min and at 10 min |
+| Does the transient amplitude depend on when it occurred? | Additive: no. Multiplicative: no for the same *relative* response, which is what the division is for |
 | Does the user baseline set the output scale? | Yes — it *is* the scale, and the dF/F0 denominator |
 
-Use the plotted **Fit** curve together with the reported `correction_constant` and
-`correction_scale` in `parameters_and_marker_edits.json` to verify what was subtracted and
-where the trace was anchored.
+Use the plotted **Fit** curve together with the reported `correction_constant`,
+`correction_form` and `correction_scale` in `parameters_and_marker_edits.json` to verify what was
+subtracted or divided out and where the trace was anchored.
 
 ### Fitting Baseline, and the level it sets
 

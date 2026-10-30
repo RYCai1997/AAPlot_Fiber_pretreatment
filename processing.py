@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import uuid
@@ -48,6 +49,12 @@ class ProcessingConfig:
     # response is not absorbed by the baseline it is measured against.
     exclusion_windows: tuple[tuple[float, float], ...] = ()
     source_channel: str = "CH1"
+    # "additive": raw = offset + B(t) + s(t), the bleach is subtracted.
+    # "multiplicative": raw = offset + B(t)·(1 + s(t)), the bleach is divided out, which keeps
+    # the relative size of a response constant as the probe fades. Probe bleaching itself is
+    # multiplicative; a drifting lamp or cable is additive, so the choice follows what the
+    # decay in these recordings actually is.
+    bleach_correction: str = "additive"
 
 
 SUPPORTED_WAVELENGTHS = ("410", "470", "560")
@@ -117,6 +124,12 @@ def available_recording_channels(data: pd.DataFrame) -> dict[str, list[str]]:
 # never hidden.
 GAP_FILL_MAX_SAMPLES = 3
 
+# An event window may not be built across a longer hole than this. Recording pauses,
+# lamp failures and dropped frames show up as holes; a hole a few samples wide is a
+# dropped frame and is interpolated, but anything approaching a second is a real
+# absence of signal and interpolating it would invent a trial.
+MAX_EVENT_GAP_SECONDS = 1.0
+
 
 def fill_short_gaps(
     values: np.ndarray,
@@ -157,10 +170,31 @@ def fill_short_gaps(
     return filled, info
 
 
+def recording_fingerprint(path: Path, sample_bytes: int = 1 << 20) -> str:
+    """Identity of a recording file, cheap enough for a multi-hundred-MB CSV.
+
+    The size plus the hash of the first and last megabyte is enough to tell two
+    recordings apart (they differ in length or in their head/tail numbers) while
+    staying fast on the 46 MB-to-GB files this tool sees. It exists so a saved
+    fit can never be replayed onto a different recording.
+    """
+    path = Path(path)
+    size = path.stat().st_size
+    digest = hashlib.sha256()
+    digest.update(str(size).encode())
+    with path.open("rb") as handle:
+        digest.update(handle.read(sample_bytes))
+        if size > 2 * sample_bytes:
+            handle.seek(size - sample_bytes)
+            digest.update(handle.read(sample_bytes))
+    return f"{size}:{digest.hexdigest()[:32]}"
+
+
 def load_recording(folder: Path) -> tuple[pd.DataFrame, list[dict[str, Any]], str]:
     path = folder / "Fluorescence.csv"
     if not path.exists():
         raise FileNotFoundError(f"File not found: {path}")
+    fingerprint = recording_fingerprint(path)
     with path.open("r", encoding="utf-8-sig", errors="replace") as handle:
         metadata = handle.readline().strip()
     data = pd.read_csv(path, skiprows=1, low_memory=False)
@@ -198,6 +232,8 @@ def load_recording(folder: Path) -> tuple[pd.DataFrame, list[dict[str, Any]], st
             info["column"] = column
             gap_fills[column] = info
     data.attrs["gap_fills"] = gap_fills
+    data.attrs["source_fingerprint"] = fingerprint
+    data.attrs["source_path"] = str(path)
 
     markers: list[dict[str, Any]] = []
     events_path = folder / "Events.csv"
@@ -1024,6 +1060,60 @@ def reference_check(
     }
 
 
+def reference_response_leak(
+    primary: np.ndarray,
+    reference: np.ndarray,
+    time_min: np.ndarray,
+    weight: float,
+    primary_level: float,
+    reference_level: float,
+    marker_times_min: tuple[float, ...] = (),
+    primary_label: str = "470",
+    reference_label: str = "410",
+    window_seconds: float = 30.0,
+) -> dict[str, Any] | None:
+    """Share of the response that a reference subtraction moves, as a fraction of it.
+
+    Subtracting ``weight × (reference − its level)`` removes whatever of the response the
+    reference channel itself carries. If that is a fraction ``k`` of the response in
+    relative terms and the two channels sit at ``primary_level`` and ``reference_level``,
+    the removed share is ``weight · k · reference_level / primary_level``; the response
+    that survives is one minus that. ``k`` is what ``reference_check`` already measures,
+    so this is a read-out of the accident, not a correction of it.
+
+    Nothing here changes the trace: an exclusion window does not help, because the same
+    weight is applied inside the event window whatever samples estimated it. Only the
+    size of ``k`` decides whether the correction is harmless (a clean isosbestic channel)
+    or eats the response.
+    """
+    if not marker_times_min or not np.isfinite(weight):
+        return None
+    try:
+        check = reference_check(
+            primary, reference, time_min, tuple(marker_times_min),
+            window_seconds=window_seconds,
+            primary_label=primary_label, reference_label=reference_label,
+        )
+    except ValueError:
+        return None
+    ratio = check.get("ratio_mean")
+    if ratio is None or not np.isfinite(ratio) or not np.isfinite(primary_level) \
+            or not np.isfinite(reference_level) or np.isclose(primary_level, 0.0):
+        return None
+    removed = float(weight) * float(ratio) * float(reference_level) / float(primary_level)
+    return {
+        "reference_ratio_mean": float(ratio),
+        "response_fraction_removed": float(removed),
+        "response_fraction_kept": float(1.0 - removed),
+        "leak_check_events": int(check.get("events_checked") or 0),
+        "leak_check_window_seconds": float(window_seconds),
+        "leak_check_note": (
+            "fraction of the event response that the reference subtraction removes, "
+            "from the reference/signal ratio measured over complete event windows"
+        ),
+    }
+
+
 def effective_baseline(
     baseline: float | None,
     offset: float | None,
@@ -1095,12 +1185,14 @@ def process_data(
     cache: dict[Any, Any] | None = None,
     data_token: Any = None,
     cancel: Any = None,
+    marker_times_min: tuple[float, ...] = (),
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Fit every wavelength and build the processed table.
 
     ``cache`` optionally reuses previous fits. A cached entry is only reused when
     the full fitting signature matches, so results are identical to a fresh fit.
     ``cancel`` is an optional ``threading.Event``; it is checked between channels.
+    ``marker_times_min`` feeds the reference-leak read-out when the channels are combined.
     """
     gap_fills = dict(data.attrs.get("gap_fills") or {})
     subset = select_effective_data(data, config)
@@ -1144,12 +1236,22 @@ def process_data(
             window_mask = np.zeros(time_min.shape, bool)
             for start, end in config.exclusion_windows:
                 window_mask |= (time_min >= float(start)) & (time_min <= float(end))
-            available = int((mask & np.isfinite(adjusted)).sum())
+            fit_samples = int((mask & np.isfinite(adjusted)).sum())
             excluded = int((mask & window_mask).sum())
-            if excluded and available - excluded >= max(200, int(0.25 * available)):
+            if excluded:
+                remaining = fit_samples - excluded
+                if remaining < max(200, int(0.25 * fit_samples)):
+                    # Silently dropping the exclusion used to be the behaviour here, which
+                    # meant the fit kept the marker windows the user had just asked to keep
+                    # out. Refuse instead: the user can always widen the regions.
+                    raise ValueError(
+                        f"The marker exclusion windows remove {excluded:,} of the "
+                        f"{fit_samples:,} fitting samples in {wavelength}, leaving "
+                        f"{remaining:,}. Widen the fitting regions in the {wavelength} fitting "
+                        "window or shorten the exclusion window; the fit will not silently "
+                        "ignore an exclusion that removes too much."
+                    )
                 mask = mask & ~window_mask
-            else:
-                excluded = 0
         model = config.fit_models.get(wavelength) or config.fit_model
         baseline_mode = config.fit_baseline_modes.get(wavelength) or "fit_constant"
         beta = config.fit_betas.get(wavelength)
@@ -1192,11 +1294,6 @@ def process_data(
             constant = parameters.get("fixed_baseline", 0.0)
         constant = float(constant)
         parameters["correction_constant"] = constant
-        # The fitted bleaching curve is subtracted in counts and the result is placed on F0,
-        # so the corrected trace sits on the fluorescence the user declared:
-        #     corrected = F0 + [(raw - offset) - F(t)]
-        # Nothing here depends on the fitted level at t0, and F0 stays a pure scale: it is
-        # the denominator of dF/F0 rather than a factor that would cancel against itself.
         if not np.isfinite(fitted).any():
             raise ValueError(f"The fitted {wavelength} curve has no finite value.")
         scale = float(fit_baseline)
@@ -1209,7 +1306,23 @@ def process_data(
             raise ValueError(
                 f"The fitted {wavelength} curve is not positive. Adjust its offset or fitting regions."
             )
-        channel_corrected = scale + (adjusted - fitted)
+        form = config.bleach_correction
+        if form == "multiplicative":
+            # The light path is modelled as raw = offset + B(t)·(1 + s(t)): the response is a
+            # fraction of the fluorescence that is still excitable, so it shrinks as the probe
+            # bleaches. Dividing by B(t) puts the trace on F0 and leaves F0·s(t), which keeps
+            # the relative size of a response the same at every time point.
+            #     corrected = F0 · (raw - offset) / F(t)
+            channel_corrected = scale * (adjusted / fitted)
+        elif form == "additive":
+            # raw = offset + B(t) + s(t): the response is added on top of the bleach, so
+            # subtracting F(t) leaves F0 + s(t) and the response keeps its size regardless of
+            # how much the trace has faded.
+            #     corrected = F0 + [(raw - offset) - F(t)]
+            channel_corrected = scale + (adjusted - fitted)
+        else:
+            raise ValueError(f"Unknown bleaching correction form: {form}")
+        parameters["correction_form"] = form
         parameters["correction_scale"] = scale
         missing = int((~np.isfinite(raw)).sum())
         if np.isfinite(raw).sum() != raw.shape[0]:
@@ -1248,6 +1361,7 @@ def process_data(
     combined = np.full(len(subset), np.nan)
     combined_label: str | None = None
     motion_fit: dict[str, Any] | None = None
+    combine_warnings: list[str] = []
     if reference is not None and config.combine == "rwd":
         # RWD motion correction: robust linear fit of the signal on the control, the
         # fitted prediction is subtracted, and the result is placed back on the level of
@@ -1266,6 +1380,13 @@ def process_data(
             "median_signal": level,
             "denominator": "F0 of the analysis channel (fitting baseline minus offset)",
         }
+        leak = reference_response_leak(
+            corrected[primary], corrected[reference], time_min, float(slope),
+            float(fit_parameters[primary]["correction_scale"]),
+            float(fit_parameters[reference]["correction_scale"]),
+            marker_times_min, primary, reference)
+        if leak is not None:
+            motion_fit.update(leak)
     elif reference is not None:
         combined, combined_label, analysis_reference, weight_used = combine_channels(
             corrected[primary], corrected[reference], config.combine, config.reference_weight,
@@ -1273,10 +1394,28 @@ def process_data(
             primary, reference,
         )
         analysis_trace = combined.copy()
+        leak = reference_response_leak(
+            corrected[primary], corrected[reference], time_min, float(weight_used),
+            float(fit_parameters[primary]["correction_scale"]),
+            float(fit_parameters[reference]["correction_scale"]),
+            marker_times_min, primary, reference)
+        if leak is not None:
+            motion_fit = dict(leak)
     else:
         analysis_trace = corrected[primary].copy()
         analysis_reference = fit_parameters[primary]["correction_scale"]
         weight_used = None
+
+    if motion_fit is not None and motion_fit.get("response_fraction_removed") is not None:
+        removed = float(motion_fit["response_fraction_removed"])
+        if abs(removed) > 0.2:
+            combine_warnings.append(
+                f"The {reference} subtraction removes about {removed:.0%} of the event "
+                f"response (reference/signal ratio {motion_fit['reference_ratio_mean']:+.2f} "
+                f"× weight {weight_used:.4g}). That is what a reference carrying its own "
+                "response looks like; check the bleed-through calibration, or set Reference "
+                "to None to keep the analysis channel alone."
+            )
 
     smooth_points = max(1, int(round(config.smooth_seconds * sample_rate)))
     combined_smoothed = (pd.Series(combined).rolling(smooth_points, center=True, min_periods=1).mean().to_numpy()
@@ -1308,15 +1447,22 @@ def process_data(
         "gap_fills": gap_fills,
         "analysis_reference_from_user_baselines": float(analysis_reference),
         "combine": config.combine if reference is not None else None,
+        "bleach_correction": config.bleach_correction,
         "reference_weight": None if weight_used is None else float(weight_used),
         "rwd_motion_fit": motion_fit,
+        "combine_warnings": combine_warnings,
+        "source_fingerprint": data.attrs.get("source_fingerprint"),
+        "source_path": data.attrs.get("source_path"),
         "normalization": None,
         "source_channel": source,
         "definitions": {
             "baseline": ("raw fluorescence level at the start of the recording; F0 = baseline - offset, "
                          "used as the correction scale and as the dF/F0 denominator"),
-            "corrected_channel": ("F0 + [(raw - offset) - fitted]; F0 = baseline - offset, "
-                                  "never the fitted level at t0"),
+            "corrected_channel": (
+                "F0 + [(raw - offset) - fitted]; F0 = baseline - offset, never the fitted level at t0"
+                if config.bleach_correction == "additive" else
+                "F0 x (raw - offset) / fitted; the bleach is divided out, so a response keeps the "
+                "same relative size however far the probe has faded"),
             "combined_channel": {
                 "ratio": "corrected analysis / corrected reference",
                 "difference": "corrected analysis - weight x (corrected reference - its level); only the reference deviation is removed",
@@ -1435,6 +1581,26 @@ def calculate_normalized_traces(
     return result, details
 
 
+def longest_gap_inside(time_s: np.ndarray, start: float, end: float) -> float:
+    """Longest stretch without a sample that a ``[start, end]`` window straddles.
+
+    The samples are the ones that survived the finite check, so a hole in the
+    recording shows up here as one wide spacing between neighbours. A window that
+    sits inside such a hole has a gap at least as long as the hole itself.
+    """
+    if len(time_s) < 2 or end <= start:
+        return 0.0
+    # Every spacing that overlaps [start, end]: from the sample just before the window to
+    # the sample just after it. A spacing that merely touches an edge does not count.
+    low = int(np.searchsorted(time_s, start, side="right")) - 1
+    high = int(np.searchsorted(time_s, end, side="left"))
+    low = max(0, low)
+    high = min(len(time_s) - 1, high)
+    if high - low < 1:
+        return 0.0
+    return float(np.max(np.diff(time_s[low:high + 1])))
+
+
 def calculate_event_locked_traces(
     processed: pd.DataFrame,
     marker_times_min: list[float],
@@ -1478,6 +1644,9 @@ def calculate_event_locked_traces(
     sample_interval = float(np.median(positive_dt))
     if not np.isfinite(sample_interval) or sample_interval <= 0:
         raise ValueError("The signal sampling interval could not be determined.")
+    # Sparse recordings legitimately have wide spacing, so the limit follows the sampling
+    # interval when that is already coarser than the absolute cap.
+    gap_limit = max(MAX_EVENT_GAP_SECONDS, 4.0 * sample_interval)
 
     pre_point_count = max(2, int(round(pre_seconds / sample_interval)) + 1)
     post_point_count = max(2, int(round(post_seconds / sample_interval)) + 1)
@@ -1504,6 +1673,18 @@ def calculate_event_locked_traces(
                 "event_index": event_index,
                 "marker_time_min": float(marker_time_min),
                 "reason": "the requested trace window extends outside the corrected recording",
+            })
+            continue
+        window_gap = longest_gap_inside(time_s, absolute_time[0], absolute_time[-1])
+        if window_gap > gap_limit:
+            # np.interp would happily draw a straight line across a paused recording and the
+            # trial would look complete. A gap wider than the limit means the window has no
+            # data of its own, so it is reported instead of being averaged in.
+            excluded.append({
+                "event_index": event_index,
+                "marker_time_min": float(marker_time_min),
+                "reason": (f"the trace window spans a {window_gap:.2f} s hole in the corrected "
+                           f"signal (limit {gap_limit:g} s)"),
             })
             continue
         trace = np.interp(absolute_time, time_s, signal)
@@ -1606,6 +1787,16 @@ def calculate_event_locked_traces(
     corrected_mean, corrected_sem = mean_and_sem(corrected_stack)
     dff_mean, dff_sem = mean_and_sem(dff_stack)
     zscore_mean, zscore_sem = mean_and_sem(zscore_stack)
+    # One trial's z is limited by that trial's own noise, and no smoother can change that
+    # without also shrinking the response. The average trace is the honest way to a larger
+    # number: its noise falls as sqrt(n), so it is standardised against its own baseline.
+    baseline_mean_dff = dff_mean[baseline_mask]
+    average_center = float(np.mean(baseline_mean_dff))
+    average_sd = float(np.std(baseline_mean_dff, ddof=1)) if baseline_mean_dff.size > 1 else float("nan")
+    if np.isfinite(average_sd) and average_sd > np.finfo(float).eps:
+        zscore_of_average = (dff_mean - average_center) / average_sd
+    else:
+        zscore_of_average = np.full(dff_mean.shape, np.nan)
     average = pd.DataFrame({
         "relative_time_s": relative_time,
         "n_trials": trial_count,
@@ -1615,6 +1806,7 @@ def calculate_event_locked_traces(
         "dff_percent_sem": dff_sem,
         "zscore_mean": zscore_mean,
         "zscore_sem": zscore_sem,
+        "zscore_of_average": zscore_of_average,
         "event_baseline": baseline_mask.astype(int),
     })
     details = {
@@ -1631,6 +1823,12 @@ def calculate_event_locked_traces(
                              else "one value per trial"),
         "pooled_baseline_sd": pooled_sd,
         "pooled_baseline_dof": int(pooled_dof),
+        "average_baseline_sd": average_sd,
+        "zscore_of_average_note": (
+            "zscore_of_average standardises the trial-averaged dF/F0 against that average's "
+            "own baseline SD, so it grows roughly as sqrt(n_trials) against a single trial's z. "
+            "Use it for the shape and significance of the average response, not as a per-trial z."
+        ),
         "normalization": ("each trial uses its own pre-marker baseline; the z-score divides by one "
                           "standard deviation pooled across trials" if pool_baseline_sd
                           else "each trial uses its own pre-marker baseline"),
@@ -1717,6 +1915,7 @@ def config_from_saved(payload: dict[str, Any]) -> ProcessingConfig:
         fit_smoothing={key: _as_float(value) for key, value in (processing.get("fit_smoothing") or {}).items()},
         exclusion_windows=_windows_from_saved(processing.get("exclusion_windows")),
         source_channel=str(processing.get("source_channel") or default.source_channel),
+        bleach_correction=str(processing.get("bleach_correction") or default.bleach_correction),
     )
 
 
@@ -1947,6 +2146,7 @@ def compare_configs(
     add("global", "reference weight", saved.reference_weight, current.reference_weight)
     add("global", "default fit model", saved.fit_model, current.fit_model)
     add("global", "smoothing (s)", float(saved.smooth_seconds), float(current.smooth_seconds))
+    add("global", "bleaching correction", saved.bleach_correction, current.bleach_correction)
     add("global", "source channel", saved.source_channel, current.source_channel)
 
     for channel in sorted(set(saved.wavelengths) | set(current.wavelengths)):

@@ -122,11 +122,13 @@ DEFAULT_STRINGS = {
     "offset410": "0", "offset470": "0", "offset560": "0",
     "baseline410": "", "baseline470": "", "baseline560": "",
     "combine": "rwd", "reference_weight": "", "fit_model": "double_exponential", "smooth": "10",
+    "bleach_correction": "additive",
     "fit410_status": "Not set", "fit470_status": "Not set", "fit560_status": "Not set",
     "norm_start": "0", "norm_end": "1",
     "norm_pre_duration": "5", "zero_time": "0", "downsample_value": "1",
     "export_window_duration": "5",
     "event_pre_seconds": "5", "event_post_seconds": "30", "event_baseline_seconds": "5",
+    "event_z_basis": "mean of trials",
     "estimate_exclude_before": "5", "estimate_exclude_after": "60",
     "event_status": "Select a marker name after loading data.",
     "x_start": "", "x_span": "", "x_end": "", "output_name": "",
@@ -151,6 +153,27 @@ LINE_WIDTH_LABELS = {
 
 WAVELENGTHS = ("410", "470", "560")
 COMBINE_MODES = ("rwd", "difference", "ratio")
+# How the fitted bleach enters the correction. Probe photobleaching removes excitable
+# molecules, so the response is a fraction of what is left and the decay has to be divided
+# out; a drifting lamp or a moving cable adds a baseline that has to be subtracted.
+BLEACH_CORRECTION_NOTES = {
+    "additive": ("Additive — corrected = F0 + [(raw − offset) − B(t)].\n"
+                 "A response keeps the same size however far the trace has faded. Use this when "
+                 "the decay comes from the instrument (lamp, cable, ambient light)."),
+    "multiplicative": ("Multiplicative — corrected = F0 × (raw − offset) / B(t).\n"
+                       "A response scales with the brightness left, so an early and a late "
+                       "response of the same relative size come out the same. Use this when the "
+                       "decay is the probe's own photobleaching."),
+}
+# Which z the average panel shows. Per-trial z stays per trial in the trial table either way;
+# this only decides what the summary curve and its exported column are standardised against.
+EVENT_Z_BASES = {
+    "mean of trials": ("Mean of per-trial z: every trial's own z, averaged point by point. Same "
+                       "scale as a single trial, with the SEM band showing the spread."),
+    "average trace": ("Z of the average trace: the trial-averaged dF/F0 standardised against its "
+                      "own baseline SD. Roughly sqrt(n_trials) times larger; describes the average "
+                      "response rather than one trial."),
+}
 TIME_UNITS = ("s", "min")
 # Fields the user edits as a duration or a timestamp, with their startup unit.
 TIME_FIELD_UNITS = {
@@ -755,6 +778,7 @@ class PretreatmentApp:
         self.axis_drag_state: dict[str, Any] | None = None
         self.box_drag_active = False
         self.vars = {key: tk.StringVar(value=value) for key, value in DEFAULT_STRINGS.items()}
+        self.event_z_basis_note_var = tk.StringVar()
         self.time_unit_vars = {key: tk.StringVar(value=unit) for key, unit in TIME_FIELD_UNITS.items()}
         self.time_unit_previous = dict(TIME_FIELD_UNITS)
         self.trace_view_var = tk.StringVar(value="overlay")
@@ -883,10 +907,19 @@ class PretreatmentApp:
             self.wavelength_frames[wavelength] = frame
             frame.grid_remove()
         row = self.section(data_tab, row, "Correction")
-        ttk.Label(data_tab, text="Corrected = raw − fitted + (Fitting Baseline − Offset)\n"
-                                 "i.e. F0 + [(raw − offset) − fitted], with F0 the lowest point of the "
-                                 "trace. The corrected trace sits on F0 and dF/F0 divides by it.",
-                  wraplength=350, justify="left").grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 6)); row += 1
+        ttk.Label(data_tab, text="Bleaching Model").grid(row=row, column=0, sticky="w")
+        self.bleach_correction_box = ttk.Combobox(
+            data_tab, textvariable=self.vars["bleach_correction"],
+            values=list(BLEACH_CORRECTION_NOTES), state="readonly", width=19,
+        )
+        self.bleach_correction_box.grid(row=row, column=1, sticky="ew"); row += 1
+        self.bleach_correction_box.bind(
+            "<<ComboboxSelected>>", lambda _event: self.bleach_correction_changed())
+        self.bleach_correction_note_var = tk.StringVar()
+        ttk.Label(data_tab, textvariable=self.bleach_correction_note_var,
+                  wraplength=350, justify="left").grid(
+            row=row, column=0, columnspan=2, sticky="w", pady=(0, 6)); row += 1
+        self.refresh_bleach_correction_note()
         row = self.section(data_tab, row, "Analysis Trace")
         ttk.Label(data_tab, text="Analysis Wavelength").grid(row=row, column=0, sticky="w")
         self.analysis_wavelength_box = ttk.Combobox(
@@ -1069,6 +1102,18 @@ class PretreatmentApp:
         row = self.add_time_entry(event_tab, row, "Trace Before Marker", "event_pre_seconds")
         row = self.add_time_entry(event_tab, row, "Trace After Marker", "event_post_seconds")
         row = self.add_time_entry(event_tab, row, "Baseline Before Marker", "event_baseline_seconds")
+        ttk.Label(event_tab, text="Average Z from").grid(row=row, column=0, sticky="w")
+        self.event_z_basis_box = ttk.Combobox(
+            event_tab, textvariable=self.vars["event_z_basis"],
+            values=list(EVENT_Z_BASES), state="readonly", width=19,
+        )
+        self.event_z_basis_box.grid(row=row, column=1, sticky="ew"); row += 1
+        self.event_z_basis_box.bind("<<ComboboxSelected>>",
+                                    lambda _event: self.event_z_basis_changed())
+        self.refresh_event_z_basis_note()
+        ttk.Label(event_tab, textvariable=self.event_z_basis_note_var, wraplength=380,
+                  style="Hint.TLabel").grid(row=row, column=0, columnspan=2, sticky="w",
+                                            pady=(2, 4)); row += 1
         self.event_pool_sd_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(event_tab, text="One baseline SD for all trials (pooled)",
                         variable=self.event_pool_sd_var,
@@ -1377,6 +1422,10 @@ class PretreatmentApp:
         """Restore every analysis, display and export option to its startup default."""
         for key, value in DEFAULT_STRINGS.items():
             self.vars[key].set(value)
+        if hasattr(self, "bleach_correction_note_var"):
+            self.refresh_bleach_correction_note()
+        if hasattr(self, "event_z_basis_note_var"):
+            self.refresh_event_z_basis_note()
         for key, unit in TIME_FIELD_UNITS.items():
             self.time_unit_vars[key].set(unit)
             self.time_unit_previous[key] = unit
@@ -1501,6 +1550,7 @@ class PretreatmentApp:
             combine=self.vars["combine"].get(),
             reference_weight=(None if self.vars["combine"].get() == "rwd"
                               else self.optional_number("reference_weight")),
+            bleach_correction=self.vars["bleach_correction"].get(),
             fit_model=self.vars["fit_model"].get(),
             smooth_seconds=smooth_seconds,
             fit_regions={value: list(self.fit_regions[value]) for value in wavelengths},
@@ -2052,6 +2102,7 @@ class PretreatmentApp:
             reference_wavelength=None if reference in {"", "None"} else reference,
             combine=self.vars["combine"].get(),
             reference_weight=self.parsed_number("reference_weight"),
+            bleach_correction=self.vars["bleach_correction"].get(),
             fit_model=self.vars["fit_model"].get(),
             smooth_seconds=(self.time_seconds("smooth", 0.0) if self.smooth_enabled_var.get() else 0.0),
             fit_regions={value: list(self.fit_regions[value]) for value in wavelengths},
@@ -2189,19 +2240,30 @@ class PretreatmentApp:
         self.markers = sorted(restored, key=lambda item: item["time_min"])
         self.refresh_markers()
 
-    def seed_saved_fits(self, payload: dict[str, Any]) -> tuple[list[str], list[str]]:
+    def seed_saved_fits(self, payload: dict[str, Any]) -> tuple[list[str], list[str], str]:
         """Put saved fitted curves into the fit cache under the current data token.
 
-        Returns the channels that were seeded and the ones that could not be.
+        Returns the channels that were seeded, the ones that could not be, and a note
+        explaining a whole-file refusal. A saved curve is only replayed when it was
+        fitted on *this* recording: two recordings can share a length and a channel
+        layout, and a curve from the other one would silently replace a real fit.
         """
         details = payload.get("fit_details") or {}
         saved_parameters = details.get("fit_parameters") or {}
         if self.data is None:
-            return [], []
+            return [], [], ""
         try:
             config = self.current_config()
         except Exception:  # noqa: BLE001
-            return [], []
+            return [], [], ""
+        saved_fingerprint = details.get("source_fingerprint")
+        current_fingerprint = self.data.attrs.get("source_fingerprint")
+        if saved_fingerprint and current_fingerprint and saved_fingerprint != current_fingerprint:
+            return [], list(config.wavelengths), (
+                "The saved file was produced from a different recording "
+                f"({saved_fingerprint} vs {current_fingerprint}), so only its settings were "
+                "restored and every channel will be fitted again."
+            )
         subset = select_effective_data(self.data, config)
         time_s = subset["TimeStamp"].to_numpy(float) / 1000
         token = self.data_token()
@@ -2248,7 +2310,7 @@ class PretreatmentApp:
             self.fit_cache[key] = (np.array(fitted, float), stored)
             self.fit_signatures[channel] = self.expected_signature(channel, config)
             seeded.append(channel)
-        return seeded, skipped
+        return seeded, skipped, ""
 
     def initialize_from_saved(self, payload: dict[str, Any]) -> None:
         from tkinter import messagebox
@@ -2285,6 +2347,10 @@ class PretreatmentApp:
             elif reference in self.available_wavelengths and reference != config.analysis_wavelength:
                 self.reference_wavelength_var.set(reference)
             self.vars["combine"].set(config.combine)
+            self.vars["bleach_correction"].set(
+                config.bleach_correction if config.bleach_correction in BLEACH_CORRECTION_NOTES
+                else "additive")
+            self.refresh_bleach_correction_note()
             self.vars["reference_weight"].set("" if config.reference_weight is None
                                               else f"{config.reference_weight:g}")
             self.vars["fit_model"].set(config.fit_model)
@@ -2304,7 +2370,7 @@ class PretreatmentApp:
 
             self.restore_saved_markers(payload.get("marker_edits") or {})
             self.vars["output_name"].set(Path(payload["_path"]).parent.name)
-            seeded, skipped = self.seed_saved_fits(payload)
+            seeded, skipped, seed_note = self.seed_saved_fits(payload)
             self.saved_baseline = {"config": config, "path": payload["_path"]}
             self.last_applied_config = None
             self.processed = None
@@ -2319,7 +2385,9 @@ class PretreatmentApp:
                 f"Restored the saved configuration from {Path(payload['_path']).parent.name}. "
                 f"Reusable fits: {', '.join(seeded) if seeded else 'none'}"
                 + (f"; refit needed for {', '.join(skipped)}" if skipped else "")
-                + ". Click Apply Correction."
+                + "."
+                + (f" {seed_note}" if seed_note else "")
+                + " Click Apply Correction."
             )
             self.vars["status"].set(message)
             messagebox.showinfo("Configuration Restored", message)
@@ -2379,6 +2447,34 @@ class PretreatmentApp:
         self.rebuild_axes();
         if self.data is not None:
             self.draw_raw_preview()
+
+    def refresh_event_z_basis_note(self) -> None:
+        value = self.vars["event_z_basis"].get()
+        self.event_z_basis_note_var.set(EVENT_Z_BASES.get(value, EVENT_Z_BASES["mean of trials"]))
+
+    def event_z_basis_changed(self) -> None:
+        """Redraw the average Z panel with the chosen basis; no recalculation is needed."""
+        self.refresh_event_z_basis_note()
+        if self.event_details is not None:
+            self.event_details["average_z_basis"] = self.vars["event_z_basis"].get()
+        if self.event_average is not None and self.event_view_active:
+            self.draw_event_analysis()
+
+    def event_average_z_columns(self) -> tuple[str, str | None, str]:
+        """Column, SEM column (None when it does not apply) and label for the average Z panel."""
+        if self.vars["event_z_basis"].get() == "average trace":
+            return "zscore_of_average", None, "Z of the average trace"
+        return "zscore_mean", "zscore_sem", "Mean per-trial Z-score"
+
+    def refresh_bleach_correction_note(self) -> None:
+        value = self.vars["bleach_correction"].get()
+        self.bleach_correction_note_var.set(
+            BLEACH_CORRECTION_NOTES.get(value, BLEACH_CORRECTION_NOTES["additive"]))
+
+    def bleach_correction_changed(self) -> None:
+        """Explain the chosen model and flag the results as stale until Apply Correction."""
+        self.refresh_bleach_correction_note()
+        self.notice_pending_changes()
 
     def combine_changed(self) -> None:
         """Refresh the raw preview or the corrected combination when the mode changes."""
@@ -2582,10 +2678,16 @@ class PretreatmentApp:
         reused = [channel for channel in config.wavelengths if channel not in changed]
         return sorted(changed), reused
 
-    def data_token(self) -> tuple[int, int] | None:
+    def data_token(self) -> tuple[Any, int] | None:
+        """Identity of the loaded recording, used to keep fits from crossing recordings."""
         if self.data is None:
             return None
-        return (id(self.data), len(self.data))
+        fingerprint = self.data.attrs.get("source_fingerprint")
+        return (fingerprint if fingerprint else id(self.data), len(self.data))
+
+    def marker_times_min(self) -> tuple[float, ...]:
+        """Current marker times, for the reference-leak read-out during processing."""
+        return tuple(float(marker["time_min"]) for marker in self.sorted_markers())
 
     def start_fit_job(self, config: ProcessingConfig) -> None:
         """Run process_data on a worker thread so the window keeps responding."""
@@ -2597,7 +2699,8 @@ class PretreatmentApp:
         refit, reused = self.incremental_scope(config)
         worker = threading.Thread(
             target=self._fit_worker,
-            args=(self.data, config, self.fit_cache, token, self.fit_cancel, result_queue),
+            args=(self.data, config, self.fit_cache, token, self.fit_cancel, result_queue,
+                  self.marker_times_min()),
             daemon=True, name="fit-worker",
         )
         self.fit_job = worker
@@ -2613,9 +2716,11 @@ class PretreatmentApp:
         self.root.after(120, lambda: self._poll_fit_job(result_queue))
 
     def _fit_worker(self, data: Any, config: ProcessingConfig, cache: dict[Any, Any],
-                    token: Any, cancel: threading.Event, result_queue: queue.Queue) -> None:
+                    token: Any, cancel: threading.Event, result_queue: queue.Queue,
+                    markers: tuple[float, ...] = ()) -> None:
         try:
-            processed, details = process_data(data, config, cache=cache, data_token=token, cancel=cancel)
+            processed, details = process_data(data, config, cache=cache, data_token=token,
+                                              cancel=cancel, marker_times_min=markers)
             result_queue.put(("ok", token, (processed, details)))
         except ProcessingCancelled:
             result_queue.put(("cancelled", token, None))
@@ -2727,6 +2832,9 @@ class PretreatmentApp:
         f0_note = self.f0_summary()
         if f0_note:
             self.vars["status"].set(self.vars["status"].get() + f0_note)
+        for text in ((self.details or {}).get("combine_warnings") or []):
+            self.vars["status"].set(self.vars["status"].get() + " " + text)
+            record_error(text)
         # Everything that was on screen is rebuilt from the new traces: the correction is the
         # only input of dF/F0 and of the event analysis, so they must not be left behind.
         if had_normalization:
@@ -3588,6 +3696,13 @@ class PretreatmentApp:
         The channel combination is read from the stored ``combined_signal`` column, so
         the event analysis follows the configured combination and reference weight
         instead of recomputing a ratio of its own.
+
+        The trace is deliberately **not** smoothed here. A centred smoother pulls the
+        response back into the pre-marker window: with a 10 s window and a 5 s baseline,
+        the baseline mean rises by a quarter of the response and the baseline SD used for
+        the z-score drops to about a sixth, which turns a 2% response into 1.5% and
+        inflates z several-fold. Event analysis therefore runs on the unsmoothed trace;
+        smoothing stays a display choice for the whole-recording panel.
         """
         if self.processed is None:
             raise ValueError("Apply correction before calculating event analysis.")
@@ -3595,7 +3710,7 @@ class PretreatmentApp:
             column = signal["column"]
             if column not in self.processed:
                 raise ValueError(f"{signal['label']} is unavailable in the corrected data.")
-            return self.display_values(column)
+            return self.processed[column].to_numpy(float)
         raise ValueError(f"Unknown event signal: {signal.get('label', signal)}")
 
     def selected_event_markers(self) -> list[dict[str, Any]]:
@@ -3826,7 +3941,11 @@ class PretreatmentApp:
                 "pre_seconds": float(pre_seconds),
                 "post_seconds": float(post_seconds),
                 "baseline_seconds": float(baseline_seconds),
-                "smoothing_seconds": self.smoothing_seconds(),
+                "smoothing_seconds": 0.0,
+                "smoothing_applied": False,
+                "smoothing_note": (
+                    "event analysis runs on the unsmoothed corrected trace, so F0 and the "
+                    "z-score denominator are not contaminated by a centred smoother"),
                 "source_channel": self.source_channel_var.get(),
                 "available_events_with_marker_name": len(self.event_marker_candidates),
                 "selected_marker_ids": list(selected_ids),
@@ -3836,13 +3955,19 @@ class PretreatmentApp:
                 "signal_details": signal_details,
                 "baseline_sd_mode": ("one value pooled across trials"
                                      if self.event_pool_sd_var.get() else "one value per trial"),
+                "average_z_basis": self.vars["event_z_basis"].get(),
+                "zscore_of_average_note": (
+                    "zscore_of_average standardises the trial-averaged dF/F0 against that "
+                    "average's own baseline SD, so it grows roughly as sqrt(n_trials) over a "
+                    "single trial's z; use it for the average response, not as a per-trial z."),
                 "pooled_baseline_sd": next(
                     (item["pooled_baseline_sd"] for item in signal_details.values()
                      if item.get("pooled_baseline_sd") is not None), None),
-                "normalization": ("each signal trial uses its own pre-marker baseline; the z-score "
-                                  "divides by one standard deviation pooled across trials"
-                                  if self.event_pool_sd_var.get()
-                                  else "each signal trial uses its own pre-marker baseline"),
+                "normalization": ("each signal trial uses its own pre-marker baseline; "
+                                  "dF/F0 divides by that mean and the z-score divides by the "
+                                  "standard deviation of the same window"
+                                  + (", pooled across trials" if self.event_pool_sd_var.get()
+                                     else "")),
             }
             self.event_trials = pd.concat(trial_frames, ignore_index=True)
             self.event_average = pd.concat(average_frames, ignore_index=True)
@@ -3904,8 +4029,10 @@ class PretreatmentApp:
             relative_time = signal_average["relative_time_s"].to_numpy(float)
             dff_mean = signal_average["dff_percent_mean"].to_numpy(float)
             dff_sem = signal_average["dff_percent_sem"].to_numpy(float)
-            zscore_mean = signal_average["zscore_mean"].to_numpy(float)
-            zscore_sem = signal_average["zscore_sem"].to_numpy(float)
+            z_mean_column, z_sem_column, z_axis_label = self.event_average_z_columns()
+            zscore_mean = signal_average[z_mean_column].to_numpy(float)
+            zscore_sem = (signal_average[z_sem_column].to_numpy(float) if z_sem_column
+                          else np.full(zscore_mean.shape, np.nan))
             mean_color = color if multiple_signals else "#5B2C83"
             mean_label = signal_label if multiple_signals else "Mean"
             dff_x, dff_y = aligned_arrays(relative_time, dff_mean)
@@ -3927,7 +4054,8 @@ class PretreatmentApp:
                                      color=mean_color, alpha=0.20,
                                      label="SEM" if not multiple_signals else None)
 
-        labels = ["Trial dF/F0 (%)", "Average dF/F0 (%)", "Trial Z-score", "Average Z-score"]
+        labels = ["Trial dF/F0 (%)", "Average dF/F0 (%)", "Trial Z-score",
+                  self.event_average_z_columns()[2]]
         baseline_start = -float(self.event_details["baseline_seconds"])
         for ax, label in zip(axes, labels):
             ax.axvspan(baseline_start, 0, color="#B8B8B8", alpha=0.18)
@@ -4163,6 +4291,7 @@ class PretreatmentApp:
         metric_columns = [
             "n_trials", "corrected_signal_mean", "corrected_signal_sem",
             "dff_percent_mean", "dff_percent_sem", "zscore_mean", "zscore_sem",
+            "zscore_of_average",
         ]
         for signal in self.ordered_event_export_signals():
             prefix = self.event_export_prefix(signal)
@@ -4214,6 +4343,29 @@ class PretreatmentApp:
             frame[column] = values
         return frame
 
+    def event_trial_map_frame(self) -> pd.DataFrame:
+        """Which marker each exported trial column came from.
+
+        The wide export numbers trials per signal, in the order they were included, so
+        ``trial07`` is the seventh *included* event and not the seventh marker. As soon as
+        one event is excluded the numbering and the markers part company, and nothing in
+        the wide table says so. This sidecar restores the link without touching the wide
+        layout that downstream readers expect.
+        """
+        if self.event_trials is None:
+            raise ValueError("Calculate event analysis before exporting the trial map.")
+        trials = self.event_trials
+        columns = [column for column in (
+            "event_signal_key", "event_signal_label", "trial", "source_event_index",
+            "marker_name", "marker_time_min", "f0", "baseline_dff_sd", "baseline_dff_n",
+        ) if column in trials]
+        if not columns:
+            return pd.DataFrame()
+        subset = ["event_signal_key", "trial"]
+        subset = [column for column in subset if column in trials] or columns[:1]
+        return (trials[columns].drop_duplicates(subset=subset)
+                .sort_values(subset).reset_index(drop=True))
+
     def save_event_trace_figure(self, output: Path) -> None:
         """Export one marker figure overlaying every trial plus the mean ± SEM."""
         from matplotlib.figure import Figure
@@ -4239,12 +4391,13 @@ class PretreatmentApp:
             average = self.event_average.loc[self.event_average["event_signal_key"] == signal["key"]]
             relative_time = average["relative_time_s"].to_numpy(float)
             mean_label = signal["label"] if len(signals) > 1 else "Mean ± SEM"
-            for axis, mean_column, sem_column in (
-                (axes[0], "dff_percent_mean", "dff_percent_sem"),
-                (axes[1], "zscore_mean", "zscore_sem"),
-            ):
+            z_mean_column, z_sem_column, _z_label = self.event_average_z_columns()
+            panels = [(axes[0], "dff_percent_mean", "dff_percent_sem"),
+                      (axes[1], z_mean_column, z_sem_column)]
+            for axis, mean_column, sem_column in panels:
                 mean_values = average[mean_column].to_numpy(float)
-                sem_values = average[sem_column].to_numpy(float)
+                sem_values = (average[sem_column].to_numpy(float) if sem_column
+                              else np.full(mean_values.shape, np.nan))
                 mean_color = "#222222" if len(signals) <= 1 else color
                 mean_x, mean_y = aligned_arrays(relative_time, mean_values)
                 axis.plot(mean_x, mean_y, color=mean_color, lw=2.0, label=mean_label)
@@ -4252,7 +4405,7 @@ class PretreatmentApp:
                     band_x, band_low, band_high = aligned_arrays(
                         relative_time, mean_values - sem_values, mean_values + sem_values)
                     axis.fill_between(band_x, band_low, band_high, color=mean_color, alpha=0.14)
-        for ax, label in zip(axes, ["dF/F0 (%)", "Z-score"]):
+        for ax, label in zip(axes, ["dF/F0 (%)", self.event_average_z_columns()[2]]):
             ax.axvspan(baseline_start, 0, color="#B8B8B8", alpha=0.18)
             ax.axvline(0, color="#C43C39", ls="--", lw=1.0)
             ax.axhline(0, color="#777777", lw=0.7, alpha=0.6)
@@ -4405,7 +4558,7 @@ class PretreatmentApp:
             return
         if event_requested and self.event_details is not None:
             try:
-                current_event = (*self.current_event_settings(), self.smoothing_seconds())
+                current_event = self.current_event_settings()
             except Exception as exc:
                 messagebox.showerror("Invalid Event Settings", str(exc)); return
             saved_event = (
@@ -4413,12 +4566,11 @@ class PretreatmentApp:
                 self.event_details["post_seconds"], self.event_details["baseline_seconds"],
                 tuple(self.event_details.get("selected_marker_ids", [])),
                 tuple(self.event_details.get("selected_signal_keys", [])),
-                self.event_details.get("smoothing_seconds", 0.0),
             )
             if current_event != saved_event:
                 messagebox.showinfo(
                     "Event Settings Changed",
-                    "The signal selection, marker selection, event intervals, baseline, or smoothing has changed. "
+                    "The signal selection, marker selection, or event intervals have changed. "
                     "Recalculate event analysis.",
                 )
                 return
@@ -4463,6 +4615,12 @@ class PretreatmentApp:
                 self.event_trials_wide_frame().to_csv(
                     output / f"event_trials_{marker_component}.csv", index=False, float_format="%.9g"
                 )
+                trial_map = self.event_trial_map_frame()
+                if not trial_map.empty:
+                    trial_map.to_csv(
+                        output / f"event_trial_map_{marker_component}.csv", index=False,
+                        float_format="%.9g"
+                    )
             if selections["event_average_csv"]:
                 assert self.event_average is not None
                 self.event_average_for_export().to_csv(
@@ -4562,9 +4720,20 @@ class PretreatmentApp:
 
             marker_values = np.zeros(len(export_frame), dtype=int)
             time_values = export_frame["relative_time_s"].to_numpy(float)
+            export_times = export_frame["original_time_min"].to_numpy(float)
+            half_step = (0.5 * float(np.median(np.diff(export_times)))
+                         if len(export_times) > 1 else 0.0)
+            low, high = float(export_times.min()) - half_step, float(export_times.max()) + half_step
+            skipped_markers: list[dict[str, Any]] = []
             for marker in self.markers:
-                marker_index = int(np.argmin(np.abs(export_frame["original_time_min"].to_numpy(float)
-                                                    - float(marker["time_min"]))))
+                when = float(marker["time_min"])
+                if when < low or when > high:
+                    # Snapping an out-of-range marker to the first or last row puts the event
+                    # where nothing happened. A reader that aligns on the first marker then
+                    # shifts the whole trace to that row, so these are dropped and reported.
+                    skipped_markers.append({"time_min": when, "name": marker.get("name")})
+                    continue
+                marker_index = int(np.argmin(np.abs(export_times - when)))
                 marker_values[marker_index] = 1
             aa_exports: dict[str, np.ndarray] = {}
             if selections["corrected_csv"]:
@@ -4581,9 +4750,16 @@ class PretreatmentApp:
                     aa_dir / aa_file_name, index=False
                 )
             current_ids = {marker["id"] for marker in self.markers}
+            # The numbers in these files come from self.processed, i.e. from the settings of
+            # the last Apply Correction. Recording the live widget values here would describe
+            # a run that was never computed, so the log carries the applied configuration and
+            # says separately what had been edited but not applied.
+            applied_config = self.last_applied_config or self.current_config()
             log = {
                 "source_folder": str(self.folder), "source_files_modified": False,
-                "processing": asdict(self.current_config()), "fit_details": self.details,
+                "processing": asdict(applied_config),
+                "unapplied_changes": self.pending_config_changes(),
+                "fit_details": self.details,
                 "event_analysis": self.event_details,
                 "selected_outputs": selections,
                 "export_annotation": {"mode": annotation_label, "limits_in_display_min": annotation_limits},
@@ -4610,6 +4786,8 @@ class PretreatmentApp:
                     "reader": r"D:\Coding\AAPlot\GUI\fiber_trace_spike2_analysis_batch_gui.py",
                     "format": "comma-separated .txt with first three columns Time(seconds), Signal, Marker",
                     "folders": list(aa_exports),
+                    "markers_written": int(marker_values.sum()),
+                    "markers_outside_export_range": skipped_markers,
                     "note": "Signal types are separated into folders so AAPlot does not treat them as separate animals in one batch.",
                 },
                 "source_metadata": self.metadata,
