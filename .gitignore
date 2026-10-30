@@ -5,3 +5,7 @@ __pycache__/
 venv/
 _old/
 aaplot_errors.log
+# Local backups and run artefacts of the two helper tools.
+*.bak_*
+InjectionFinder/injection_finder_crash.log
+InjectionFinder/tests/_tmp/
