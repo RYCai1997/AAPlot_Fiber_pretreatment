@@ -296,5 +296,42 @@ class AverageZBasisTest(unittest.TestCase):
         self.assertIn("average trace", label)
 
 
+class ModelSuggestionTest(unittest.TestCase):
+    """The fitting-window hint must follow the shape of the decay, not a fixed rule."""
+
+    def _advice(self, values, seconds=600.0, fs=10.0):
+        t = np.arange(0, seconds, 1 / fs)
+        return P.suggest_bleaching_model(t, values, np.ones(t.size, bool))
+
+    def test_single_exponential_is_recognised(self):
+        t = np.arange(0, 600.0, 0.1)
+        advice = self._advice(4.0e4 * np.exp(-t / 300.0) + 20.0)
+        self.assertEqual(advice["model"], "single_exponential")
+        self.assertGreater(advice["stats"]["log_linear_r2"], 0.99)
+
+    def test_double_exponential_is_recognised(self):
+        t = np.arange(0, 600.0, 0.1)
+        values = 2.0e4 * np.exp(-t / 25.0) + 2.0e4 * np.exp(-t / 400.0) + 20.0
+        advice = self._advice(values)
+        self.assertEqual(advice["model"], "double_exponential")
+        self.assertLess(advice["stats"]["log_linear_r2"], 0.995)
+
+    def test_flat_trace_needs_no_correction(self):
+        t = np.arange(0, 600.0, 0.1)
+        advice = self._advice(1.0e4 + 5.0 * np.sin(t / 100.0))
+        self.assertEqual(advice["model"], "none")
+
+    def test_shallow_decay_suggests_a_line(self):
+        t = np.arange(0, 600.0, 0.1)
+        advice = self._advice(1.0e4 - 200.0 * (t / 600.0))
+        self.assertEqual(advice["model"], "linear")
+
+    def test_too_few_samples_gives_no_model(self):
+        t = np.arange(0, 5.0, 0.1)
+        advice = P.suggest_bleaching_model(t, 1.0e4 * np.exp(-t / 300.0), np.ones(t.size, bool))
+        self.assertIsNone(advice["model"])
+        self.assertIn("Widen", advice["summary"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -55,7 +55,9 @@ tab. Edits are kept in memory and written to `markers_working_copy.csv` on expor
    level they set. A baseline that is not larger than the offset is rejected with an error naming
    the channel, because nothing would be left of it once the offset is removed.
 2. Open **Configure <wavelength> Fit...** for every wavelength, select one or more regions and a
-   model, preview, and confirm.
+   model, preview, and confirm. The window suggests a model under the model list — it reads how
+   much the decay fades, how straight it is in log space and how many time constants fit in the
+   window — with a **Use Suggested Model** button next to the advice.
 3. Pick the **Bleaching Model**. `additive` (default) subtracts the fitted decay and keeps a
    response the same size however far the trace has faded; `multiplicative` divides the decay out,
    which is what the probe's own photobleaching does and keeps a response the same *relative* size
@@ -151,7 +153,7 @@ marker 可在 **Data & Fitting** 标签页的 **Markers (Working Copy)** 里增�
 ## 工作流程
 
 1. **Data & Fitting** —— 点 **Select Recording Folder** 选择记录文件夹，选 **Recording Channel**，设置 **Valid Data Range**，然后为每个可见通道填 **Offset** 和 **Fitting Baseline**。这里的 baseline 是**漂白后曲线的最低点**——信号最终衰减到的平台值——从**原始**曲线上读出，因此它仍包含 offset：程序会从中减掉 offset，并把校正后的曲线放在这个水平上，所以请保持 **Keep these windows out of the bleaching fit** 勾选，marker 窗口就不会把基线往响应方向拉。dF/F0 随后用基线窗内校正曲线的均值归一化，也就是说这两个字段是通过它们设定的水平起作用的。baseline 不大于 offset 会被拒绝，并报出具体通道名，因为减掉 offset 之后什么都不剩了。
-2. 为每个波长打开 **Configure <wavelength> Fit...**，选一个或多个区间和模型，预览，然后确认。
+2. 为每个波长打开 **Configure <wavelength> Fit...**，选一个或多个区间和模型，预览，然后确认。窗口会在模型列表下方给出模型建议——它读取衰减幅度、对数空间里的直线程度，以及窗口内能容纳几个时间常数——旁边有 **Use Suggested Model** 按钮可直接采用。
 3. 选择 **Bleaching Model**。`additive`（默认）减去拟合出的衰减，响应大小不随漂白程度变化；`multiplicative` 把衰减除掉，这正是探针自身光漂白的情形，能让 1 min 和 20 min 处**相对幅度相同**的响应输出一致。两种公式和一个算例见 [docs/fitting.md](docs/fitting.md)。
 4. 选择 **Analysis Wavelength**，可选地设置 **Reference Wavelength** 和 **Combine Channels** 模式。有参考通道时默认的 `rwd` 模式会拟合并减去运动成分；设为 `None` 则只使用独立校正后的分析通道。
 5. 点 **Apply Correction**。每个可用波长分别独立校正。

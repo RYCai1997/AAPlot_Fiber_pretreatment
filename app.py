@@ -114,6 +114,7 @@ from processing import (
     rwd_motion_corrected,
     rwd_motion_label,
     select_effective_data,
+    suggest_bleaching_model,
 )
 
 
@@ -267,6 +268,16 @@ class FitWindow:
         )
         self.model_box.pack(fill=tk.X, pady=(0, 7))
         self.model_box.bind("<<ComboboxSelected>>", self.invalidate_preview)
+        self.suggested_model: str | None = None
+        self.suggestion_var = tk.StringVar(value="")
+        suggestion_frame = ttk.Frame(left)
+        suggestion_frame.pack(fill=tk.X, pady=(0, 7))
+        ttk.Label(suggestion_frame, textvariable=self.suggestion_var, style="Hint.TLabel",
+                  wraplength=250, justify="left").pack(anchor="w")
+        self.use_suggestion_button = ttk.Button(
+            suggestion_frame, text="Use Suggested Model", command=self.use_suggested_model)
+        self.use_suggestion_button.pack(anchor="w", pady=(3, 0))
+        self.use_suggestion_button.state(["disabled"])
         ttk.Label(left, text="PLS beta (5-12)").pack(anchor="w", pady=(4, 0))
         pls_row = ttk.Frame(left)
         pls_row.pack(fill=tk.X, pady=(0, 7))
@@ -345,6 +356,7 @@ class FitWindow:
             self.selected_region_index = int(np.clip(self.selected_region_index, 0, len(self.regions) - 1))
             self.region_list.selection_set(self.selected_region_index)
             self.region_list.see(self.selected_region_index)
+        self.update_model_suggestion()
 
     def add_region(self) -> None:
         if self.busy:
@@ -378,6 +390,41 @@ class FitWindow:
             self.selected_region_index = selected[0]
             self.update_patch_styles()
             self.canvas.draw_idle()
+
+    def update_model_suggestion(self) -> None:
+        """Advise a model from the shape of the selected decay; never applies it.
+
+        The advice follows the regions the user is dragging, so it is refreshed from
+        ``refresh_list`` as well as after every edit.
+        """
+        if not hasattr(self, "use_suggestion_button"):
+            return
+        if not self.regions:
+            self.suggestion_var.set(
+                "Add a fitting region to see which model the decay in it supports.")
+            self.suggested_model = None
+            self.use_suggestion_button.state(["disabled"])
+            return
+        try:
+            suggestion = suggest_bleaching_model(
+                self.time_s, self.values, region_mask(self.time_min, self.regions))
+        except Exception:  # noqa: BLE001 - advice must never block the fitting window
+            self.suggestion_var.set("")
+            self.suggested_model = None
+        else:
+            self.suggestion_var.set(str(suggestion.get("summary", "")))
+            self.suggested_model = suggestion.get("model")
+        if self.suggested_model and self.suggested_model != self.model_var.get():
+            self.use_suggestion_button.state(["!disabled"])
+        else:
+            self.use_suggestion_button.state(["disabled"])
+
+    def use_suggested_model(self) -> None:
+        if not self.suggested_model:
+            return
+        self.model_var.set(self.suggested_model)
+        self.invalidate_preview()
+        self.update_model_suggestion()
 
     def invalidate_preview(self, _event: Any = None) -> None:
         self.fitted_preview = None

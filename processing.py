@@ -366,6 +366,128 @@ def _multi_start_curve(
     return _best_result(refined)
 
 
+def suggest_bleaching_model(
+    time_s: np.ndarray,
+    values: np.ndarray,
+    fit_mask: np.ndarray,
+) -> dict[str, Any]:
+    """Which bleaching model the selected samples actually support.
+
+    Reads the decay itself: how much of the trace fades inside the regions, how
+    straight it is in log space, and how many time constants fit in the window. A
+    single exponential cannot be told apart from a double one when the recording is
+    shorter than a couple of time constants, and nothing can be fitted to a trace
+    that barely fades. The answer is advice; nothing is applied automatically.
+
+    Returns ``{"model", "summary", "stats"}``, where ``model`` is the suggested
+    model name or ``None`` when the regions are too small to judge.
+    """
+    x = np.asarray(time_s, float)
+    y = np.asarray(values, float)
+    mask = np.asarray(fit_mask, bool) & np.isfinite(x) & np.isfinite(y)
+    samples = int(mask.sum())
+    stats: dict[str, Any] = {"samples": samples}
+    if samples < 100:
+        return {
+            "model": None,
+            "summary": (f"Only {samples} samples inside the fitting regions. Widen them first: "
+                        "every model here needs at least a hundred to be judged."),
+            "stats": stats,
+        }
+    xs, ys = x[mask], y[mask]
+    order = np.argsort(xs)
+    xs, ys = xs[order], ys[order]
+    edge = max(5, samples // 50)
+    head = float(np.median(ys[:edge]))
+    tail = float(np.median(ys[-edge:]))
+    duration = float(xs[-1] - xs[0])
+    if head <= 0:
+        return {
+            "model": None,
+            "summary": ("The selected samples are not positive after the offset is removed, so no "
+                        "decay can be read. Check the offset for this channel first."),
+            "stats": {**stats, "duration_s": duration},
+        }
+    fade = (head - tail) / head
+    stats.update({"fade": fade, "duration_s": duration})
+    if fade <= 0.0:
+        return {
+            "model": "none",
+            "summary": (f"Suggested: none. The trace does not fall inside the regions "
+                        f"({fade:+.1%}); there is no bleaching to correct."),
+            "stats": stats,
+        }
+    if fade < 0.01:
+        return {
+            "model": "none",
+            "summary": (f"Suggested: none. The trace fades only {fade:.2%} inside the regions; "
+                        "correcting that would do more harm than leaving it."),
+            "stats": stats,
+        }
+    if fade < 0.05:
+        return {
+            "model": "linear",
+            "summary": (f"Suggested: linear. The trace fades only {fade:.1%} inside the regions, "
+                        "so a time constant cannot be identified; a straight line is enough."),
+            "stats": stats,
+        }
+    if np.any(ys <= 0):
+        return {
+            "model": None,
+            "summary": ("Some selected samples are not positive after the offset is removed, so "
+                        "the decay shape cannot be read. Check the offset for this channel."),
+            "stats": stats,
+        }
+    log_y = np.log(ys)
+    design = np.column_stack((xs, np.ones_like(xs)))
+    coefficients, *_rest = np.linalg.lstsq(design, log_y, rcond=None)
+    straight = design @ coefficients
+    residual = log_y - straight
+    spread_total = float(np.sum((log_y - log_y.mean()) ** 2))
+    r_squared = 1.0 - float(np.sum(residual ** 2)) / spread_total if spread_total > 0 else 0.0
+    slope = float(coefficients[0])
+    tau = float(-1.0 / slope) if slope < 0 else float("inf")
+    decays_in_window = duration / tau if np.isfinite(tau) and tau > 0 else float("inf")
+    parts = [part for part in np.array_split(np.arange(samples), 3) if part.size]
+    curvature = 0.0
+    if len(parts) == 3:
+        means = [float(np.mean(residual[part])) for part in parts]
+        curvature = abs(means[1] - 0.5 * (means[0] + means[2]))
+    residual_sd = float(np.std(residual)) or 1e-12
+    stats.update({
+        "log_linear_r2": r_squared,
+        "tau_s": tau if np.isfinite(tau) else None,
+        "decays_in_window": decays_in_window if np.isfinite(decays_in_window) else None,
+        "curvature_ratio": curvature / residual_sd,
+    })
+    # A bend that is smaller than the scatter itself is noise, not a second component.
+    bends = curvature / residual_sd >= 0.5
+    if r_squared >= 0.995 or not bends:
+        return {
+            "model": "single_exponential",
+            "summary": (f"Suggested: single_exponential. The trace fades {fade:.0%} and is "
+                        f"straight in log space (R² {r_squared:.4f}); one time constant "
+                        "already describes it."),
+            "stats": stats,
+        }
+    if decays_in_window < 1.5:
+        return {
+            "model": "penalized",
+            "summary": (f"Suggested: penalized (PLS). The decay is not a single exponential "
+                        f"(log-linear R² {r_squared:.3f}) but only {decays_in_window:.1f} time "
+                        "constants fit in the window, so a second one cannot be separated; PLS "
+                        "follows the shape without naming the components."),
+            "stats": stats,
+        }
+    return {
+        "model": "double_exponential",
+        "summary": (f"Suggested: double_exponential. Log-linear R² is only {r_squared:.3f} and the "
+                    f"residual bends the same way at both ends, with {decays_in_window:.1f} time "
+                    "constants in the window, so a second one is identifiable."),
+        "stats": stats,
+    }
+
+
 def fit_bleaching(
     time_s: np.ndarray,
     values: np.ndarray,

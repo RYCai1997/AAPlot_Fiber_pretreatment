@@ -109,6 +109,20 @@ reinterpreted as an already-subtracted level: that guess would silently produce 
 - Only samples inside the selected regions enter parameter estimation, refinement or scoring,
   but the fitted curve is evaluated over the whole trace. Regions that skip the initial decay
   therefore extrapolate and distort the early corrected values.
+- The window suggests a model under the model list and offers **Use Suggested Model**. The advice
+  follows the regions being dragged and reads the decay itself: how much it fades, how straight it
+  is in log space, and how many time constants fit inside the window.
+
+  | Reading | Suggestion |
+  | --- | --- |
+  | fewer than 100 samples in the regions | none — widen them first |
+  | no fall, or less than 1% | `none` |
+  | 1–5% fall | `linear` |
+  | log-linear R² ≥ 0.995, or the residual bend is smaller than the scatter | `single_exponential` |
+  | a real bend, but fewer than 1.5 time constants inside the window | `penalized` — two exponentials cannot be separated |
+  | a real bend with room for it | `double_exponential` |
+
+  It is advice only; nothing is applied until the model is picked and the fit confirmed.
 - The baseline initializes the freely fitted constant (`fit_constant`) and is used as the
   fixed constant in `fixed` mode. In `fixed` mode a baseline that disagrees with the plateau
   of the data is reported in `fit_warnings`.
