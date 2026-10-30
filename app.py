@@ -2591,6 +2591,10 @@ class PretreatmentApp:
             self.details["reference_weight"] = (None if mode == "ratio" else _weight)
             self.details["analysis_reference_from_user_baselines"] = float(analysis_reference)
             self.details["rwd_motion_fit"] = motion_fit
+            # Only a fresh Apply can measure the leak and judge the reference again, so the
+            # old read-outs and warnings must not survive a mode change.
+            self.details["reference_leak"] = None
+            self.details["combine_warnings"] = []
             self.details["reference_check"] = None
             self.details["normalization"] = None
         self.refresh_event_signal_list()
@@ -3324,9 +3328,10 @@ class PretreatmentApp:
                 self.plot_display(ax, x, self.display_values("combined_signal")[indices], color="#7B4B94",
                         lw=self.line_width("combined"), gid="combined")
                 fit = (self.details or {}).get("rwd_motion_fit")
-                if fit is not None:
+                slope = None if fit is None else fit.get("slope")
+                if slope is not None:
                     ax.set_ylabel(f"RWD motion-corrected {self.analysis_wavelength_var.get()} "
-                                  f"(slope={float(fit['slope']):.4g})")
+                                  f"(slope={float(slope):.4g})")
                 else:
                     ax.set_ylabel(self.details.get("combined_label") or "Corrected ratio")
             elif key == "dff":

@@ -1483,6 +1483,7 @@ def process_data(
     combined = np.full(len(subset), np.nan)
     combined_label: str | None = None
     motion_fit: dict[str, Any] | None = None
+    reference_leak: dict[str, Any] | None = None
     combine_warnings: list[str] = []
     if reference is not None and config.combine == "rwd":
         # RWD motion correction: robust linear fit of the signal on the control, the
@@ -1509,6 +1510,7 @@ def process_data(
             marker_times_min, primary, reference)
         if leak is not None:
             motion_fit.update(leak)
+            reference_leak = leak
     elif reference is not None:
         combined, combined_label, analysis_reference, weight_used = combine_channels(
             corrected[primary], corrected[reference], config.combine, config.reference_weight,
@@ -1516,24 +1518,24 @@ def process_data(
             primary, reference,
         )
         analysis_trace = combined.copy()
-        leak = reference_response_leak(
+        # A leak read-out is not a motion fit: only the rwd branch has a slope, so this must
+        # never be stored under rwd_motion_fit (the plot reads its slope from there).
+        reference_leak = reference_response_leak(
             corrected[primary], corrected[reference], time_min, float(weight_used),
             float(fit_parameters[primary]["correction_scale"]),
             float(fit_parameters[reference]["correction_scale"]),
             marker_times_min, primary, reference)
-        if leak is not None:
-            motion_fit = dict(leak)
     else:
         analysis_trace = corrected[primary].copy()
         analysis_reference = fit_parameters[primary]["correction_scale"]
         weight_used = None
 
-    if motion_fit is not None and motion_fit.get("response_fraction_removed") is not None:
-        removed = float(motion_fit["response_fraction_removed"])
+    if reference_leak is not None and reference_leak.get("response_fraction_removed") is not None:
+        removed = float(reference_leak["response_fraction_removed"])
         if abs(removed) > 0.2:
             combine_warnings.append(
                 f"The {reference} subtraction removes about {removed:.0%} of the event "
-                f"response (reference/signal ratio {motion_fit['reference_ratio_mean']:+.2f} "
+                f"response (reference/signal ratio {reference_leak['reference_ratio_mean']:+.2f} "
                 f"× weight {weight_used:.4g}). That is what a reference carrying its own "
                 "response looks like; check the bleed-through calibration, or set Reference "
                 "to None to keep the analysis channel alone."
@@ -1572,6 +1574,7 @@ def process_data(
         "bleach_correction": config.bleach_correction,
         "reference_weight": None if weight_used is None else float(weight_used),
         "rwd_motion_fit": motion_fit,
+        "reference_leak": reference_leak,
         "combine_warnings": combine_warnings,
         "source_fingerprint": data.attrs.get("source_fingerprint"),
         "source_path": data.attrs.get("source_path"),

@@ -333,5 +333,44 @@ class ModelSuggestionTest(unittest.TestCase):
         self.assertIn("Widen", advice["summary"])
 
 
+class CombineDetailsTest(unittest.TestCase):
+    """A leak read-out must never be stored where a motion fit is expected."""
+
+    def _run(self, mode):
+        fs, seconds, tau = 30.0, 900.0, 500.0
+        t = np.arange(0, seconds, 1 / fs)
+        bleach = 4.0e4 * np.exp(-t / tau)
+        response = np.zeros_like(t)
+        response[(t >= 600) & (t < 620)] = 1.0
+        primary = 100.0 + bleach * (1 + 0.10 * response)
+        reference = 100.0 + 0.6 * bleach * (1 + 0.03 * response)
+        frame = pd.DataFrame({"TimeStamp": t * 1000, "CH1-470": primary, "CH1-410": reference})
+        frame.attrs["source_fingerprint"] = "test:combine"
+        cfg = P.ProcessingConfig(
+            range_start_min=0.0, range_end_min=seconds / 60,
+            offsets={"470": 100.0, "410": 100.0},
+            baselines={"470": 100.0 + float(np.median(primary[-600:])),
+                       "410": 100.0 + float(np.median(reference[-600:]))},
+            wavelengths=["470", "410"], analysis_wavelength="470", reference_wavelength="410",
+            combine=mode, smooth_seconds=0.0,
+            fit_regions={"470": [(2.0, 9.0)], "410": [(2.0, 9.0)]},
+            fit_models={"470": "single_exponential", "410": "single_exponential"},
+            fit_baseline_modes={"470": "fit_constant", "410": "fit_constant"})
+        return P.process_data(frame, cfg, data_token=("combine", mode),
+                              marker_times_min=(610 / 60,))[1]
+
+    def test_difference_mode_reports_a_leak_and_no_motion_fit(self):
+        details = self._run("difference")
+        self.assertIsNone(details["rwd_motion_fit"])
+        self.assertIsNotNone(details["reference_leak"])
+        self.assertIn("response_fraction_removed", details["reference_leak"])
+
+    def test_rwd_mode_keeps_the_slope_in_the_motion_fit(self):
+        details = self._run("rwd")
+        self.assertIsNotNone(details["rwd_motion_fit"])
+        self.assertIn("slope", details["rwd_motion_fit"])
+        self.assertIn("response_fraction_removed", details["rwd_motion_fit"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
