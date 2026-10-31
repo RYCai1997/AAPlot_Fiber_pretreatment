@@ -29,6 +29,31 @@ import threading
 import traceback
 import queue
 
+# Platform choices used both by the import guard below and by the GUI/figure
+# code further down, so they have to be defined before the imports are tried.
+if sys.platform == "darwin":
+    # PingFang.ttc is a font collection Pillow cannot open, so the CJK
+    # candidates here are the ones that actually load on macOS.
+    FONT_CANDIDATES = [
+        "/System/Library/Fonts/Hiragino Sans GB.ttc",
+        "/Library/Fonts/Arial Unicode.ttf",
+        "/System/Library/Fonts/Supplemental/Songti.ttc",
+    ]
+    FONT_BOLD = FONT_CANDIDATES[0]
+    UI_FONT = "PingFang SC"
+    MONO_FONT = "Menlo"
+    LAUNCHER_HINT = "run_InjectionFinder.command"
+else:
+    FONT_CANDIDATES = [
+        r"C:\Windows\Fonts\msyh.ttc",
+        r"C:\Windows\Fonts\simhei.ttf",
+        r"C:\Windows\Fonts\simsun.ttc",
+    ]
+    FONT_BOLD = r"C:\Windows\Fonts\msyhbd.ttc"
+    UI_FONT = "Microsoft YaHei"
+    MONO_FONT = "Consolas"
+    LAUNCHER_HINT = "run_InjectionFinder.bat"
+
 try:
     import numpy as np
     import pandas as pd
@@ -36,7 +61,7 @@ try:
 except ImportError as _exc:        # 缺第三方库：给中文可执行指引，而不是裸 traceback
     _msg = (
         "缺少运行依赖：%s\n\n"
-        "请双击本目录下的 run_InjectionFinder.bat 自动安装，\n"
+        "请双击本目录下的 " + LAUNCHER_HINT + " 自动安装，\n"
         "或在本机命令行执行：\n"
         "    \"%s\" -m pip install numpy pandas pillow\n"
         % (_exc, sys.executable)
@@ -48,13 +73,6 @@ except ImportError as _exc:        # 缺第三方库：给中文可执行指引�
     except Exception:
         pass
     sys.exit(1)
-
-FONT_CANDIDATES = [
-    r"C:\Windows\Fonts\msyh.ttc",
-    r"C:\Windows\Fonts\simhei.ttf",
-    r"C:\Windows\Fonts\simsun.ttc",
-]
-FONT_BOLD = r"C:\Windows\Fonts\msyhbd.ttc"
 
 
 def open_in_file_manager(path):
@@ -319,12 +337,16 @@ def write_events(src, dst, hits):
 # 出图
 # --------------------------------------------------------------------------
 def _font(size, bold=False):
-    path = FONT_BOLD if bold else None
-    if bold and os.path.isfile(path):
-        return ImageFont.truetype(path, size)
-    for p in FONT_CANDIDATES:
-        if os.path.isfile(p):
+    # A candidate can exist but still fail to open (a font collection, or a
+    # broken file), so each one is tried instead of assuming the first match
+    # works; the PIL default is the last resort rather than the first.
+    for p in ((FONT_BOLD,) if bold else ()) + tuple(FONT_CANDIDATES):
+        if not p or not os.path.isfile(p):
+            continue
+        try:
             return ImageFont.truetype(p, size)
+        except Exception:
+            continue
     return ImageFont.load_default()
 
 
@@ -655,7 +677,7 @@ def launch_gui():
     vo = tk.StringVar(value="")
     vars_["outdir"] = vo
     ttk.Entry(ofrm, textvariable=vo).pack(side="left", fill="x", expand=True, padx=(0, 6))
-    ttk.Label(ofrm, text="（留空 = 源目录下 injection_marker\\）", font=("Microsoft YaHei", 8)).pack(side="left")
+    ttk.Label(ofrm, text="（留空 = 源目录下 injection_marker\\）", font=(UI_FONT, 8)).pack(side="left")
 
     # 按钮
     btn = ttk.Frame(root, padding=(10, 10, 10, 4))
@@ -668,7 +690,7 @@ def launch_gui():
     # 日志
     lf = ttk.Frame(root, padding=(10, 4, 10, 10))
     lf.pack(fill="both", expand=True)
-    txt = tk.Text(lf, height=16, wrap="word", font=("Consolas", 9))
+    txt = tk.Text(lf, height=16, wrap="word", font=(MONO_FONT, 9))
     sb = ttk.Scrollbar(lf, command=txt.yview)
     txt.configure(yscrollcommand=sb.set)
     txt.pack(side="left", fill="both", expand=True)

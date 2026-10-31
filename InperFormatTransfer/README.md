@@ -10,13 +10,18 @@
 | `inper_db.py` | data.db 解析层（SQLite 只读），`load_recording()` 返回帧/标记/配置 |
 | `inper_transfer.py` | 命令行入口，产出 CSV |
 | `inper_transfer_gui.py` | 图形界面（tkinter），选输入/输出/是否跳过 unaligned |
-| `run_inper_transfer.bat` | 双击启动 GUI |
+| `run_inper_transfer.bat` | 双击启动 GUI（Windows） |
+| `run_inper_transfer.command` | 双击启动 GUI（macOS） |
 
 无第三方依赖，Python 3.9+ 自带 `sqlite3` 即可（GUI 需自带 tkinter 的 Python）。
 
 ## GUI
 
-双击 `run_inper_transfer.bat`，或 `python inper_transfer_gui.py`。
+双击 `run_inper_transfer.bat`（macOS 双击 `run_inper_transfer.command`），或 `python inper_transfer_gui.py`。
+
+macOS 的启动器复用主程序那份虚拟环境（`~/Library/Application Support/AAPlotFiberPretreatment/venv`，没有就建），
+因为本工具只用标准库，所以正常情况下不会联网装任何东西；`--no-install` 只做检查，`--recreate` 重建环境。
+界面字体在 macOS 上用苹方（PingFang SC）+ Menlo，Windows 上仍是 Segoe UI + Consolas。
 
 - **Session folder**：选含 `data.db` 的 session 文件夹；也可以点 `data.db…` 直接选那个文件（自动取父目录）
 - **Output folder**：留空 = 把 CSV 写回 session 文件夹；也可另选目录

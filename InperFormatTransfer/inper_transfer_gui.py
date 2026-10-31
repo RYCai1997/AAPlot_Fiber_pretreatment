@@ -47,6 +47,17 @@ PALETTE = {
     "log_bg": "#fbfcfd",
 }
 
+# Segoe UI and Consolas ship with Windows only; Tk would silently substitute a
+# font with different metrics, so name the local equivalent instead.  The
+# labels are Chinese, so the UI font has to be one that owns CJK glyphs rather
+# than one that leans on per-character fallback.
+if sys.platform == "darwin":
+    UI_FONT = "PingFang SC"
+    MONO_FONT = "Menlo"
+else:
+    UI_FONT = "Segoe UI"
+    MONO_FONT = "Consolas"
+
 
 class ConverterApp:
     def __init__(self, root: tk.Tk) -> None:
@@ -78,25 +89,25 @@ class ConverterApp:
         except tk.TclError:
             pass
         style.configure(".", background=PALETTE["window"], foreground=PALETTE["text"],
-                        font=("Segoe UI", 9))
+                        font=(UI_FONT, 9))
         style.configure("TFrame", background=PALETTE["window"])
         style.configure("Panel.TFrame", background=PALETTE["panel"])
         style.configure("TLabel", background=PALETTE["window"], foreground=PALETTE["text"],
-                        font=("Segoe UI", 9))
+                        font=(UI_FONT, 9))
         style.configure("Panel.TLabel", background=PALETTE["panel"], foreground=PALETTE["text"],
-                        font=("Segoe UI", 9))
+                        font=(UI_FONT, 9))
         style.configure("TCheckbutton", background=PALETTE["panel"], foreground=PALETTE["text"],
-                        font=("Segoe UI", 9))
+                        font=(UI_FONT, 9))
         style.configure("Hint.TLabel", background=PALETTE["panel"], foreground=PALETTE["muted"],
-                        font=("Segoe UI", 8))
+                        font=(UI_FONT, 8))
         style.configure("Status.TLabel", background=PALETTE["window"], foreground=PALETTE["accent"],
-                        font=("Segoe UI", 9, "bold"))
+                        font=(UI_FONT, 9, "bold"))
         style.configure("HeaderTitle.TLabel", background=PALETTE["window"], foreground=PALETTE["text"],
-                        font=("Segoe UI", 15, "bold"))
+                        font=(UI_FONT, 15, "bold"))
         style.configure("HeaderSubtitle.TLabel", background=PALETTE["window"], foreground=PALETTE["muted"],
-                        font=("Segoe UI", 9))
-        style.configure("TButton", font=("Segoe UI", 9), padding=(7, 4))
-        style.configure("Accent.TButton", font=("Segoe UI", 10, "bold"), padding=(18, 8),
+                        font=(UI_FONT, 9))
+        style.configure("TButton", font=(UI_FONT, 9), padding=(7, 4))
+        style.configure("Accent.TButton", font=(UI_FONT, 10, "bold"), padding=(18, 8),
                         borderwidth=0, background=PALETTE["accent"], foreground="#ffffff")
         style.map("Accent.TButton",
                   background=[("active", PALETTE["accent_active"]), ("disabled", "#a9bcc8")],
@@ -104,7 +115,7 @@ class ConverterApp:
         style.configure("TLabelframe", background=PALETTE["panel"],
                         bordercolor=PALETTE["border"], borderwidth=1)
         style.configure("TLabelframe.Label", background=PALETTE["panel"],
-                        foreground=PALETTE["text"], font=("Segoe UI", 10, "bold"))
+                        foreground=PALETTE["text"], font=(UI_FONT, 10, "bold"))
         style.configure("TEntry", padding=4)
         style.configure("Horizontal.TProgressbar", background=PALETTE["accent"],
                         troughcolor=PALETTE["panel"], borderwidth=0)
@@ -170,7 +181,7 @@ class ConverterApp:
         logframe.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
         self.log = tk.Text(logframe, height=10, wrap="word", relief=tk.FLAT, borderwidth=1,
                            background=PALETTE["log_bg"], foreground=PALETTE["text"],
-                           font=("Consolas", 9), state=tk.DISABLED)
+                           font=(MONO_FONT, 9), state=tk.DISABLED)
         scroll = ttk.Scrollbar(logframe, orient=tk.VERTICAL, command=self.log.yview)
         self.log.configure(yscrollcommand=scroll.set)
         scroll.pack(side=tk.RIGHT, fill=tk.Y)

@@ -18,6 +18,18 @@ Python 3.8+，`numpy`、`pandas`、`Pillow`；GUI 需要标准库 `tkinter`（Wi
 - 不建议直接双击 `.py`：`.py` 交给系统 `py.exe`，它未必选中装了依赖的解释器
   （本机 `py` 默认是 Python 3.9，没有 numpy，双击会一闪就退）。
 
+## macOS 双击启动
+
+- 双击 **`run_InjectionFinder.command`**：找一个确实带 `tkinter` 的 Python 3.9+，复用主程序那份虚拟环境
+  （`~/Library/Application Support/AAPlotFiberPretreatment/venv`，没有就建），只在导入失败时安装 `requirements.txt`。
+  首次下载的副本若无执行权限，先 `chmod +x run_InjectionFinder.command`；被「门禁」拦住时右键 →「打开」一次。
+- 命令行模式照样走启动器，参数原样转发：
+  `./run_InjectionFinder.command --nogui --fluo Fluorescence.csv --events Events.csv`
+- Mac 上没有 `run_InjectionFinder.bat` / `setup_env.bat`；`--no-install` 只做检查，`--recreate` 重建虚拟环境，
+  `AAPLOT_VENV_DIR` 可改位置，`AAPLOT_NO_PAUSE=1` 跳过结尾暂停。
+- 出图的中文字体在 macOS 上用冬青黑体（Hiragino Sans GB）/ Arial Unicode / 宋体，界面字体用苹方 + Menlo。
+  `PingFang.ttc` 是字体集合，Pillow 打不开，所以没有列进候选。
+
 > `.py` 已加保护：缺依赖会弹中文提示并给出 pip 命令；运行期未捕获异常写入同目录 `injection_finder_crash.log`。
 
 ## 用法
