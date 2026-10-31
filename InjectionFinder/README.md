@@ -62,6 +62,10 @@ python injection_marker_gui.py --nogui --fluo <Fluorescence.csv> --events <Event
 | `--mode` | start_end | `start_end` 写 Start/End 两个 marker；`single` 只在窗口中心写一个 |
 | `--time-unit` | auto | 时间戳单位 `auto` / `ms` / `s` |
 
+给了 `--nogui` 或 `--fluo` 就是批处理模式：参数/路径/窗口问题只在 stderr 打一行 `错误：…` 并以退出码 1
+结束，**不弹窗**（弹窗是模态的，会把调用它的脚本卡在那儿等人点 OK）；只有真正没预料到的异常才写
+`injection_finder_crash.log`。正常结束时退出码 0。
+
 ## 输出（三个文件）
 
 - `Fluorescence.csv` — 逐行照抄源文件（二进制级：编码、BOM、换行方式全保留），只把 marker 时刻所在数据行的 `Events` 字段填入 marker 名

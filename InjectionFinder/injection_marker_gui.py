@@ -54,6 +54,19 @@ else:
     MONO_FONT = "Consolas"
     LAUNCHER_HINT = "run_InjectionFinder.bat"
 
+
+def _is_gui_run():
+    """True when this process is going to open a window.
+
+    A command-line run must never raise a dialog: the box is modal, so it
+    would block the caller until someone clicks it, and the same message is
+    already on stderr.  --nogui or --fluo mean the run is scripted.
+    """
+    argv = sys.argv[1:]
+    if "--nogui" in argv:
+        return False
+    return not any(arg == "--fluo" or arg.startswith("--fluo=") for arg in argv)
+
 try:
     import numpy as np
     import pandas as pd
@@ -67,11 +80,12 @@ except ImportError as _exc:        # 缺第三方库：给中文可执行指引�
         % (_exc, sys.executable)
     )
     print(_msg, file=sys.stderr)
-    try:
-        import tkinter.messagebox as _mb
-        _mb.showerror("InjectionFinder 缺少依赖", _msg)
-    except Exception:
-        pass
+    if _is_gui_run():
+        try:
+            import tkinter.messagebox as _mb
+            _mb.showerror("InjectionFinder 缺少依赖", _msg)
+        except Exception:
+            pass
     sys.exit(1)
 
 
@@ -841,6 +855,18 @@ if __name__ == "__main__":
         main()
     except SystemExit:
         raise
+    except (RuntimeError, ValueError, OSError) as _exc:
+        # Every one of these is a deliberate refusal (bad range, no candidate,
+        # output would overwrite the source), so it gets one clean line instead
+        # of a traceback, and never a modal box in a scripted run.
+        print("错误：%s" % _exc, file=sys.stderr)
+        if _is_gui_run():
+            try:
+                from tkinter import messagebox as _mb_err
+                _mb_err.showerror("InjectionFinder", str(_exc))
+            except Exception:
+                pass
+        sys.exit(1)
     except Exception:               # 未捕获异常留痕，避免窗口一闪而过没有线索
         _detail = traceback.format_exc()
         try:
@@ -850,10 +876,11 @@ if __name__ == "__main__":
         except Exception:
             pass
         print(_detail, file=sys.stderr)
-        try:
-            from tkinter import messagebox as _mb2
-            _mb2.showerror("InjectionFinder 运行出错",
-                           "详细原因已写入 injection_finder_crash.log\n\n" + _detail[-1500:])
-        except Exception:
-            pass
+        if _is_gui_run():
+            try:
+                from tkinter import messagebox as _mb2
+                _mb2.showerror("InjectionFinder 运行出错",
+                               "详细原因已写入 injection_finder_crash.log\n\n" + _detail[-1500:])
+            except Exception:
+                pass
         sys.exit(1)
