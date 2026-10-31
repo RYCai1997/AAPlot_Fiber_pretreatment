@@ -480,6 +480,14 @@ fi
 
 # ---------------------------------------------------------------- launch
 
+# --no-install means "check, do not install".  Once every check above has
+# passed there is nothing left for it to do, so stop here instead of opening
+# the app: starting it after a check-only run is not what the flag promises.
+if [ "$NO_INSTALL" -eq 1 ]; then
+    printf '\n[check] Everything above passed; app.py was not started (--no-install).\n'
+    finish 0
+fi
+
 printf '\n[OK] Starting app.py with the managed %s environment...\n' "$BACKEND"
 printf '     Error log: %s/aaplot_errors.log\n\n' "$LOG_DIR"
 

@@ -194,6 +194,13 @@ fi
 
 # ------------------------------------------------------------------- launch
 
+# --no-install means "check, do not install": with every check passed there is
+# nothing left to do, so stop rather than opening the window anyway.
+if [ "$NO_INSTALL" -eq 1 ]; then
+    printf '\n[check] Everything above passed; %s was not started (--no-install).\n' "$(basename -- "$ENTRY")"
+    finish 0
+fi
+
 printf '[3/3] Starting %s ...\n\n' "$(basename -- "$ENTRY")"
 cd -- "$SCRIPT_DIR" || { printf '[ERROR] Cannot enter %s\n' "$SCRIPT_DIR" >&2; finish 1; }
 
