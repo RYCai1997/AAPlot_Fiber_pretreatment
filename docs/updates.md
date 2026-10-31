@@ -3,6 +3,27 @@
 Newest first. Superseded behaviour is marked, so an old entry does not contradict the current
 manual.
 
+## 2026-10-31
+
+- macOS is supported. `run_RWD_fiber_pretreatment.command` is the counterpart of the `.bat`: it
+  finds a Python 3.9+ that really contains `tkinter`, creates a virtualenv at
+  `~/Library/Application Support/AAPlotFiberPretreatment/venv`, runs the same `env_check.py`
+  check and installs only what is missing. conda is a fallback for a machine where it is the only
+  Python, and `--no-install`, `--recreate`, `--venv`, `--conda`, `AAPLOT_VENV_DIR` and
+  `AAPLOT_NO_PAUSE` mirror the Windows launcher. The error log moves to
+  `~/Library/Logs/AAPlotFiberPretreatment/` there, and the mouse wheel uses the event sign rather
+  than Windows' 120-unit delta. The README now states, per platform, which file to double-click.
+- `InjectionFinder` and `InperFormatTransfer` got `run_*.command` launchers, share the same
+  virtualenv, and pick fonts per platform (PingFang SC + Menlo on macOS, Hiragino Sans GB and
+  Arial Unicode for Pillow). `_font()` tries every candidate instead of trusting the first file
+  that exists, which is what used to fall back to the bitmap default silently.
+- A scripted run no longer opens dialogs. `--nogui` runs used to route every error through a Tk
+  messagebox, which is modal: a caller stalled until somebody clicked OK, and the tool's own
+  check script took 2m29s instead of 3s. Expected refusals now print one `错误：…` line and exit
+  1; only unexpected exceptions write `injection_finder_crash.log`.
+- `--no-install` no longer starts the app once the check passes. It says "check only" and the
+  README describes it that way, but a healthy machine launched the GUI anyway.
+
 ## 2026-10-29
 
 - Event analysis can pool the baseline noise: **One baseline SD for all trials (pooled)**

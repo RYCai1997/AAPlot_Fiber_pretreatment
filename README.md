@@ -8,11 +8,31 @@ Input files are opened read-only and are never modified.
 
 ## Install and start
 
-- **Windows:** double-click `run_RWD_fiber_pretreatment.bat`.
-- **macOS:** double-click `run_RWD_fiber_pretreatment.command`, or run it from Terminal. If a
-  downloaded copy is not executable, run `chmod +x run_RWD_fiber_pretreatment.command` once and
-  use **Open** from Finder's context menu the first time if Gatekeeper asks for confirmation.
-- A prepared environment can still start the program directly with `python app.py`.
+Each platform has its own launcher. Use the one that matches your system; they are not
+interchangeable.
+
+| Platform | Launcher file | How to open it |
+| --- | --- | --- |
+| **Windows** 10 / 11 | `run_RWD_fiber_pretreatment.bat` | Double-click it in File Explorer. A console window opens, runs the checks, and stays open until you close the app. |
+| **macOS** 11 or newer, Intel or Apple Silicon | `run_RWD_fiber_pretreatment.command` | Double-click it in Finder, or run `./run_RWD_fiber_pretreatment.command` in Terminal. A Terminal window opens and stays open while the app runs. |
+| Any platform, dependencies already in place | `app.py` | `python app.py` on Windows, `python3 app.py` on macOS. |
+
+**Windows prerequisites:** Anaconda or Miniconda must be installed (the launcher looks for
+`conda.exe` in the usual locations and on `PATH`). The first run creates the conda environment
+`aaplot` with Python 3.12 and installs the dependencies into it, which takes a few minutes; later
+runs reuse it.
+
+**Opening on macOS for the first time:**
+
+- If a downloaded copy lost its executable bit, run `chmod +x run_RWD_fiber_pretreatment.command`
+  once in the repository folder.
+- Gatekeeper may refuse the first double-click of a downloaded `.command` with *"cannot be opened
+  because it is from an unidentified developer"*. Right-click the file → **Open** → **Open** once,
+  or run `xattr -d com.apple.quarantine run_RWD_fiber_pretreatment.command`. A normal double-click
+  works from then on.
+- Do not double-click `app.py` and do not try the `.bat` here: the `.bat` is Windows-only, and
+  `.py` is handed to whichever `python3` the system picks, which usually lacks the dependencies and
+  closes again immediately.
 
 Both launchers self-check the environment, verify every package in `requirements.txt` through
 `env_check.py`, install missing dependencies, and start `app.py` with the managed interpreter.
@@ -152,9 +172,21 @@ development assistance from **OpenAI Codex** and **DeepSeek Harness**.
 
 ## 安装与启动
 
-- **Windows：**双击 `run_RWD_fiber_pretreatment.bat`。
-- **macOS：**双击 `run_RWD_fiber_pretreatment.command`，也可在终端中运行。若下载后的文件没有执行权限，先执行一次 `chmod +x run_RWD_fiber_pretreatment.command`；若“门禁”首次拦截，请在 Finder 中右键选择“打开”并确认。
-- 已准备好环境时，仍可直接执行 `python app.py`。
+每个平台有自己的启动文件，请按系统选择，两者不能互用。
+
+| 平台 | 启动文件 | 打开方式 |
+| --- | --- | --- |
+| **Windows** 10 / 11 | `run_RWD_fiber_pretreatment.bat` | 在资源管理器中**双击**。会打开一个控制台窗口，先做环境检查，窗口一直保留到关闭程序为止。 |
+| **macOS** 11 及以上，Intel 或 Apple Silicon | `run_RWD_fiber_pretreatment.command` | 在访达（Finder）中**双击**，或在终端里执行 `./run_RWD_fiber_pretreatment.command`。会打开一个终端窗口，程序运行期间保持打开。 |
+| 任意平台，依赖已就绪 | `app.py` | Windows 下 `python app.py`，macOS 下 `python3 app.py`。 |
+
+**Windows 前置条件：** 需已安装 Anaconda 或 Miniconda（启动器会在常见安装位置与 `PATH` 中查找 `conda.exe`）。首次运行会创建名为 `aaplot` 的 conda 环境（Python 3.12）并安装依赖，需要几分钟；之后再运行直接复用。
+
+**macOS 首次打开：**
+
+- 若下载后的副本丢失了执行权限，在仓库目录下执行一次 `chmod +x run_RWD_fiber_pretreatment.command`。
+- “门禁”（Gatekeeper）可能拦住已下载 `.command` 的首次双击，提示“无法打开，因为来自身份不明的开发者”。此时在文件上**右键 →「打开」→「打开」**一次，或执行 `xattr -d com.apple.quarantine run_RWD_fiber_pretreatment.command`；之后普通双击即可。
+- 不要双击 `app.py`，也不要尝试 `.bat`：`.bat` 只适用于 Windows；`.py` 会被交给系统选中的那个 `python3`，通常没有依赖，双击后一闪就退。
 
 两个启动器都会自检环境，通过 `env_check.py` 逐项核对 `requirements.txt`，安装缺失依赖，再用所管理环境的解释器启动 `app.py`。
 

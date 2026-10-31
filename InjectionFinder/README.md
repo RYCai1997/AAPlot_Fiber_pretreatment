@@ -10,7 +10,16 @@
 Python 3.8+，`numpy`、`pandas`、`Pillow`；GUI 需要标准库 `tkinter`（Windows 官方安装包自带）。
 不需要 matplotlib，图由 Pillow 手绘。
 
-## Windows 双击启动
+## 启动
+
+| 平台 | 双击这个文件 | 说明 |
+| --- | --- | --- |
+| **Windows** | `run_InjectionFinder.bat` | 自动挑选装了 numpy / pandas / Pillow / tkinter 的 Python，缺依赖先装，然后打开界面 |
+| **macOS** | `run_InjectionFinder.command` | 复用主程序那份虚拟环境，仅在导入失败时安装依赖，然后打开界面 |
+
+两个启动器做的事相同，细节分别见下。
+
+### Windows
 
 - 双击 **`run_InjectionFinder.bat`** 启动界面：自动挑选装了 numpy / pandas / Pillow / tkinter 的 Python；
   缺依赖会先自动 `pip install`（默认源失败自动换清华镜像）。
@@ -18,14 +27,15 @@ Python 3.8+，`numpy`、`pandas`、`Pillow`；GUI 需要标准库 `tkinter`（Wi
 - 不建议直接双击 `.py`：`.py` 交给系统 `py.exe`，它未必选中装了依赖的解释器
   （本机 `py` 默认是 Python 3.9，没有 numpy，双击会一闪就退）。
 
-## macOS 双击启动
+### macOS
 
 - 双击 **`run_InjectionFinder.command`**：找一个确实带 `tkinter` 的 Python 3.9+，复用主程序那份虚拟环境
   （`~/Library/Application Support/AAPlotFiberPretreatment/venv`，没有就建），只在导入失败时安装 `requirements.txt`。
   首次下载的副本若无执行权限，先 `chmod +x run_InjectionFinder.command`；被「门禁」拦住时右键 →「打开」一次。
+  也可在终端执行 `./run_InjectionFinder.command`。
 - 命令行模式照样走启动器，参数原样转发：
   `./run_InjectionFinder.command --nogui --fluo Fluorescence.csv --events Events.csv`
-- Mac 上没有 `run_InjectionFinder.bat` / `setup_env.bat`；`--no-install` 只做检查，`--recreate` 重建虚拟环境，
+- Mac 上没有 `run_InjectionFinder.bat` / `setup_env.bat`；只做检查用 `--no-install`，`--recreate` 重建虚拟环境，
   `AAPLOT_VENV_DIR` 可改位置，`AAPLOT_NO_PAUSE=1` 跳过结尾暂停。
 - 出图的中文字体在 macOS 上用冬青黑体（Hiragino Sans GB）/ Arial Unicode / 宋体，界面字体用苹方 + Menlo。
   `PingFang.ttc` 是字体集合，Pillow 打不开，所以没有列进候选。

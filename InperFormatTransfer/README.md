@@ -17,10 +17,15 @@
 
 ## GUI
 
-双击 `run_inper_transfer.bat`（macOS 双击 `run_inper_transfer.command`），或 `python inper_transfer_gui.py`。
+| 平台 | 打开方式 | 说明 |
+| --- | --- | --- |
+| **Windows** | 双击 `run_inper_transfer.bat` | 自动挑一个带 `tkinter` 的 Python，然后打开界面 |
+| **macOS** | 双击 `run_inper_transfer.command`，或终端执行 `./run_inper_transfer.command` | 复用主程序那份虚拟环境（没有就建），然后打开界面 |
+| 任意平台 | `python inper_transfer_gui.py` | 依赖已就绪时可直接启动 |
 
 macOS 的启动器复用主程序那份虚拟环境（`~/Library/Application Support/AAPlotFiberPretreatment/venv`，没有就建），
-因为本工具只用标准库，所以正常情况下不会联网装任何东西；`--no-install` 只做检查，`--recreate` 重建环境。
+因为本工具只用标准库，所以正常情况下不会联网装任何东西；只做检查用 `--no-install`，`--recreate` 重建环境。
+首次下载的 `.command` 若无执行权限，先 `chmod +x run_inper_transfer.command`；被「门禁」拦住时右键 →「打开」一次。
 界面字体在 macOS 上用苹方（PingFang SC）+ Menlo，Windows 上仍是 Segoe UI + Consolas。
 
 - **Session folder**：选含 `data.db` 的 session 文件夹；也可以点 `data.db…` 直接选那个文件（自动取父目录）
