@@ -35,7 +35,7 @@ Python 3.8+，`numpy`、`pandas`、`Pillow`；GUI 需要标准库 `tkinter`（Wi
   也可在终端执行 `./run_InjectionFinder.command`。
 - 命令行模式照样走启动器，参数原样转发：
   `./run_InjectionFinder.command --nogui --fluo Fluorescence.csv --events Events.csv`
-- Mac 上没有 `run_InjectionFinder.bat` / `setup_env.bat`；只做检查用 `--no-install`，`--recreate` 重建虚拟环境，
+- Mac 上没有 `run_InjectionFinder.bat` / `setup_env.bat`；不建环境、不装依赖用 `--no-install`（依赖齐全时照常打开界面），`--recreate` 重建虚拟环境，
   `AAPLOT_VENV_DIR` 可改位置，`AAPLOT_NO_PAUSE=1` 跳过结尾暂停。
 - 出图的中文字体在 macOS 上用冬青黑体（Hiragino Sans GB）/ Arial Unicode / 宋体，界面字体用苹方 + Menlo。
   `PingFang.ttc` 是字体集合，Pillow 打不开，所以没有列进候选。

@@ -21,8 +21,9 @@ manual.
   messagebox, which is modal: a caller stalled until somebody clicked OK, and the tool's own
   check script took 2m29s instead of 3s. Expected refusals now print one `错误：…` line and exit
   1; only unexpected exceptions write `injection_finder_crash.log`.
-- `--no-install` no longer starts the app once the check passes. It says "check only" and the
-  README describes it that way, but a healthy machine launched the GUI anyway.
+- `--no-install` keeps the Windows meaning in the new launchers: it never creates the environment
+  and never installs packages, but a run whose dependencies are all present still starts the app.
+  Anything missing stops the run with the list to install.
 
 ## 2026-10-29
 
@@ -190,7 +191,8 @@ manual.
 - Added a Windows launcher self-check: `run_RWD_fiber_pretreatment.bat` locates Anaconda, creates
   or reuses the `aaplot` conda environment, validates `requirements.txt` with `env_check.py`,
   installs missing packages with `pip`, and starts `app.py` with that environment's interpreter.
-  `--no-install` only checks; `--recreate` rebuilds the environment.
+  `--no-install` never creates the environment or installs packages (the app still starts when
+  everything is already in place); `--recreate` rebuilds the environment.
 
 ## 2026-09-25
 

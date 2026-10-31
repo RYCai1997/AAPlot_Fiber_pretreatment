@@ -13,7 +13,7 @@
 #      ./run_InjectionFinder.command --nogui --fluo ... --events ...
 #  runs the command-line mode.
 #
-#  Options :  --no-install   check only, never create/install
+#  Options :  --no-install   never create/install, start if ready
 #             --recreate     rebuild the shared virtualenv
 #  Env var :  AAPLOT_NO_PAUSE=1        skip the final pause
 #             AAPLOT_VENV_DIR=<path>  where the virtualenv lives
@@ -95,7 +95,7 @@ find_base_python() {
 
 usage() {
     printf 'Usage: %s [--no-install] [--recreate] [--] [script arguments...]\n' "$(basename -- "$0")"
-    printf '  --no-install   Check only; never create an environment or install.\n'
+    printf '  --no-install   Never create the environment or install; start if ready.\n'
     printf '  --recreate     Rebuild the shared virtualenv.\n'
     printf '  Everything after the launcher options is passed to the script, for\n'
     printf '  example: %s --nogui --fluo Fluorescence.csv --events Events.csv\n' "$(basename -- "$0")"
@@ -193,13 +193,6 @@ else
 fi
 
 # ------------------------------------------------------------------- launch
-
-# --no-install means "check, do not install": with every check passed there is
-# nothing left to do, so stop rather than opening the window anyway.
-if [ "$NO_INSTALL" -eq 1 ]; then
-    printf '\n[check] Everything above passed; %s was not started (--no-install).\n' "$(basename -- "$ENTRY")"
-    finish 0
-fi
 
 printf '[3/3] Starting %s ...\n\n' "$(basename -- "$ENTRY")"
 cd -- "$SCRIPT_DIR" || { printf '[ERROR] Cannot enter %s\n' "$SCRIPT_DIR" >&2; finish 1; }

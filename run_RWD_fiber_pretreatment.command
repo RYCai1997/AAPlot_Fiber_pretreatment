@@ -13,7 +13,7 @@
 #  and still uses the "aaplot" conda environment.  Here conda is only
 #  a fallback for the case where no Python with Tk can be found.
 #
-#  Options :  --no-install / --check   only check, never create/install
+#  Options :  --no-install / --check   never create/install, start if ready
 #             --recreate              rebuild the managed environment
 #             --venv | --conda        force one backend
 #  Env var :  AAPLOT_NO_PAUSE=1        skip the final pause (automation)
@@ -81,7 +81,9 @@ Usage: run_RWD_fiber_pretreatment.command [options]
 
   (no option)    Check the environment, create it when missing, install
                  whatever is missing, then start app.py.
-  --no-install   Only check. Never create an environment or install packages.
+  --no-install   Never create the environment or install packages. Anything
+                 already in place is used as it is, so the app still starts;
+                 if something is missing the run stops and lists it.
   --check        Alias of --no-install.
   --recreate     Move the managed environment aside and rebuild it.
   --venv         Force the private virtualenv backend (default).
@@ -479,14 +481,6 @@ EOF
 fi
 
 # ---------------------------------------------------------------- launch
-
-# --no-install means "check, do not install".  Once every check above has
-# passed there is nothing left for it to do, so stop here instead of opening
-# the app: starting it after a check-only run is not what the flag promises.
-if [ "$NO_INSTALL" -eq 1 ]; then
-    printf '\n[check] Everything above passed; app.py was not started (--no-install).\n'
-    finish 0
-fi
 
 printf '\n[OK] Starting app.py with the managed %s environment...\n' "$BACKEND"
 printf '     Error log: %s/aaplot_errors.log\n\n' "$LOG_DIR"

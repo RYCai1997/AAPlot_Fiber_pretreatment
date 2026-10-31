@@ -24,7 +24,7 @@
 | 任意平台 | `python inper_transfer_gui.py` | 依赖已就绪时可直接启动 |
 
 macOS 的启动器复用主程序那份虚拟环境（`~/Library/Application Support/AAPlotFiberPretreatment/venv`，没有就建），
-因为本工具只用标准库，所以正常情况下不会联网装任何东西；只做检查用 `--no-install`，`--recreate` 重建环境。
+因为本工具只用标准库，所以正常情况下不会联网装任何东西；不建环境用 `--no-install`（环境就绪时照常打开界面），`--recreate` 重建环境。
 首次下载的 `.command` 若无执行权限，先 `chmod +x run_inper_transfer.command`；被「门禁」拦住时右键 →「打开」一次。
 界面字体在 macOS 上用苹方（PingFang SC）+ Menlo，Windows 上仍是 Segoe UI + Consolas。
 

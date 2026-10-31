@@ -45,8 +45,10 @@ and only then starts `app.py`. `tkinter` comes with the interpreter and cannot b
 `pip`, so when no usable Python is found the launcher prints how to install one
 (`brew install python@3.12 python-tk@3.12`, python.org or Miniforge). Conda is used only as a
 fallback when conda is the sole Python on the machine, or with `--conda`; `--venv` forces the
-virtualenv backend. `--no-install` (or `--check`) only reports the check result, `--recreate`
-rebuilds the managed environment, and `AAPLOT_NO_PAUSE=1` skips the final pause for automation.
+virtualenv backend. `--no-install` (or `--check`) never creates the environment and never installs
+anything: whatever is already in place is used as it is, so the app still starts, and a missing
+piece stops the run with the list of what to install. `--recreate` rebuilds the managed
+environment, and `AAPLOT_NO_PAUSE=1` skips the final pause for automation.
 Set `AAPLOT_VENV_DIR` to move the macOS virtualenv. If `pip` hits a filtered network, export
 `PIP_INDEX_URL` (for example `https://mirrors.aliyun.com/pypi/simple/`) and rerun. A rebuild never
 deletes anything: the previous environment is kept next to the new one as `venv.old-<timestamp>`
@@ -190,7 +192,7 @@ development assistance from **OpenAI Codex** and **DeepSeek Harness**.
 
 两个启动器都会自检环境，通过 `env_check.py` 逐项核对 `requirements.txt`，安装缺失依赖，再用所管理环境的解释器启动 `app.py`。
 
-Windows 启动器使用名为 `aaplot` 的 conda 环境。macOS 启动器不依赖 conda：它寻找一个确实带 `tkinter` 的 Python 3.9+，在 `~/Library/Application Support/AAPlotFiberPretreatment/venv` 创建专用虚拟环境，用 `pip` 安装 `requirements.txt` 里的依赖，确认 Tk 与本地 `processing` 模块都能导入后才启动 `app.py`。`tkinter` 由解释器自带、pip 装不了，所以找不到可用 Python 时启动器会直接给出安装办法（`brew install python@3.12 python-tk@3.12`、python.org 安装包或 Miniforge）。conda 只在机器上找不到别的 Python 时自动兜底，也可用 `--conda` 显式选择；`--venv` 强制使用虚拟环境。`--no-install`（或 `--check`）只报告检查结果，`--recreate` 重建受管环境，`AAPLOT_NO_PAUSE=1` 跳过最后的暂停（用于自动化），`AAPLOT_VENV_DIR` 可移动 macOS 虚拟环境。若 pip 受网络限制，先 `export PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/` 再重跑。重建不会删除任何东西：旧环境留在新环境旁边，名为 `venv.old-<时间戳>`（约 300 MB），新环境确认可用后可自行删除。
+Windows 启动器使用名为 `aaplot` 的 conda 环境。macOS 启动器不依赖 conda：它寻找一个确实带 `tkinter` 的 Python 3.9+，在 `~/Library/Application Support/AAPlotFiberPretreatment/venv` 创建专用虚拟环境，用 `pip` 安装 `requirements.txt` 里的依赖，确认 Tk 与本地 `processing` 模块都能导入后才启动 `app.py`。`tkinter` 由解释器自带、pip 装不了，所以找不到可用 Python 时启动器会直接给出安装办法（`brew install python@3.12 python-tk@3.12`、python.org 安装包或 Miniforge）。conda 只在机器上找不到别的 Python 时自动兜底，也可用 `--conda` 显式选择；`--venv` 强制使用虚拟环境。`--no-install`（或 `--check`）不创建环境、也不安装任何东西：已经就绪的部分照原样使用，所以程序仍会启动；若缺东西则停下并列出需要安装的包。`--recreate` 重建受管环境，`AAPLOT_NO_PAUSE=1` 跳过最后的暂停（用于自动化），`AAPLOT_VENV_DIR` 可移动 macOS 虚拟环境。若 pip 受网络限制，先 `export PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/` 再重跑。重建不会删除任何东西：旧环境留在新环境旁边，名为 `venv.old-<时间戳>`（约 300 MB），新环境确认可用后可自行删除。
 
 macOS 上仓库路径与虚拟环境路径都可以包含空格或中文，启动器对每个传入的路径都加了引号。错误信息会追加到 `~/Library/Logs/AAPlotFiberPretreatment/aaplot_errors.log`；Windows 与其他平台仍写在 `app.py` 同目录。
 
