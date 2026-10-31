@@ -6,6 +6,8 @@ Launch with:  python inper_transfer_gui.py
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 import queue
 import threading
 import tkinter as tk
@@ -19,6 +21,20 @@ from inper_transfer import (  # noqa: E402
     UNALIGNED,
     convert_session,
 )
+
+
+def open_in_file_manager(path: str) -> None:
+    """Reveal a folder in Explorer, Finder or the desktop's file manager.
+
+    os.startfile exists only on Windows; on macOS it raises AttributeError,
+    which is not an OSError and used to escape the caller's handler.
+    """
+    if sys.platform == "darwin":
+        subprocess.Popen(["open", path])
+    elif os.name == "nt":
+        os.startfile(path)  # type: ignore[attr-defined]
+    else:
+        subprocess.Popen(["xdg-open", path])
 
 PALETTE = {
     "window": "#eef2f5",
@@ -183,8 +199,8 @@ class ConverterApp:
         target = self.last_out
         if target and Path(target).is_dir():
             try:
-                os.startfile(str(target))  # type: ignore[attr-defined]
-            except OSError as exc:
+                open_in_file_manager(str(target))
+            except Exception as exc:  # noqa: BLE001 - report, never crash the window
                 messagebox.showerror("Cannot open folder", str(exc), parent=self.root)
 
     def _resolve_session(self) -> Path:

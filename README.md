@@ -8,15 +8,34 @@ Input files are opened read-only and are never modified.
 
 ## Install and start
 
-- A Python 3 installation, or Anaconda on Windows.
-- `pip install -r requirements.txt` (`matplotlib`, `numpy`, `pandas`, `scipy`).
-- Start with `run_RWD_fiber_pretreatment.bat`, or `python app.py` in a prepared environment.
+- **Windows:** double-click `run_RWD_fiber_pretreatment.bat`.
+- **macOS:** double-click `run_RWD_fiber_pretreatment.command`, or run it from Terminal. If a
+  downloaded copy is not executable, run `chmod +x run_RWD_fiber_pretreatment.command` once and
+  use **Open** from Finder's context menu the first time if Gatekeeper asks for confirmation.
+- A prepared environment can still start the program directly with `python app.py`.
 
-On Windows the launcher self-checks the environment: it locates Anaconda, creates the `aaplot`
-conda environment (Python 3.12) when missing, verifies every package in `requirements.txt`
-through `env_check.py`, installs what is missing with `pip`, and starts `app.py` with that
-environment's interpreter. `--no-install` only reports the check result, `--recreate` rebuilds
-the environment, and `AAPLOT_NO_PAUSE=1` skips the final pause for automation.
+Both launchers self-check the environment, verify every package in `requirements.txt` through
+`env_check.py`, install missing dependencies, and start `app.py` with the managed interpreter.
+
+The Windows launcher uses the `aaplot` conda environment. The macOS launcher is independent of
+conda: it looks for a Python 3.9+ that really includes `tkinter`, creates a private virtual
+environment at `~/Library/Application Support/AAPlotFiberPretreatment/venv`, installs what
+`requirements.txt` asks for with `pip`, checks that Tk and the local `processing` module import,
+and only then starts `app.py`. `tkinter` comes with the interpreter and cannot be installed by
+`pip`, so when no usable Python is found the launcher prints how to install one
+(`brew install python@3.12 python-tk@3.12`, python.org or Miniforge). Conda is used only as a
+fallback when conda is the sole Python on the machine, or with `--conda`; `--venv` forces the
+virtualenv backend. `--no-install` (or `--check`) only reports the check result, `--recreate`
+rebuilds the managed environment, and `AAPLOT_NO_PAUSE=1` skips the final pause for automation.
+Set `AAPLOT_VENV_DIR` to move the macOS virtualenv. If `pip` hits a filtered network, export
+`PIP_INDEX_URL` (for example `https://mirrors.aliyun.com/pypi/simple/`) and rerun. A rebuild never
+deletes anything: the previous environment is kept next to the new one as `venv.old-<timestamp>`
+(about 300 MB) and can be removed once the new one works.
+
+On macOS the repository path and the virtualenv path may contain spaces or Chinese characters, and
+the launcher quotes every path it passes on. Errors are appended to
+`~/Library/Logs/AAPlotFiberPretreatment/aaplot_errors.log`; on Windows and Linux the log stays
+beside `app.py`.
 
 ## Input folder
 
@@ -108,7 +127,7 @@ the exact file list.
 
 | Symptom | Cause and fix |
 | --- | --- |
-| A dialog appears during apply or plotting | The full traceback is also written to `aaplot_errors.log` beside `app.py`, appended, never overwritten — send that file. |
+| A dialog appears during apply or plotting | The full traceback is appended to `aaplot_errors.log`. On macOS it is stored in `~/Library/Logs/AAPlotFiberPretreatment/`; on other platforms it remains beside `app.py`. Send that file when reporting the error. |
 | `Series of different length were trimmed ...` in the status line | Two series reached a plot with different lengths; they are trimmed and reported instead of aborting the redraw. Usually an empty cell in the recording. |
 | `6 cells in CH1-410 left as a gap` | More than 3 consecutive samples are missing. The trace keeps a gap there; fill or remove those rows in `Fluorescence.csv` if they are not a real dropout. |
 | Apply does nothing / asks to confirm regions | A data-range, model or baseline-mode change invalidates that channel's confirmed fit. Offset and baseline edits do not. |
@@ -133,11 +152,15 @@ development assistance from **OpenAI Codex** and **DeepSeek Harness**.
 
 ## 安装与启动
 
-- 已安装 Python 3，或 Windows 上的 Anaconda。
-- `pip install -r requirements.txt`（`matplotlib`、`numpy`、`pandas`、`scipy`）。
-- 用 `run_RWD_fiber_pretreatment.bat` 启动，或在准备好的环境里执行 `python app.py`。
+- **Windows：**双击 `run_RWD_fiber_pretreatment.bat`。
+- **macOS：**双击 `run_RWD_fiber_pretreatment.command`，也可在终端中运行。若下载后的文件没有执行权限，先执行一次 `chmod +x run_RWD_fiber_pretreatment.command`；若“门禁”首次拦截，请在 Finder 中右键选择“打开”并确认。
+- 已准备好环境时，仍可直接执行 `python app.py`。
 
-在 Windows 上，启动脚本会自检环境：定位 Anaconda，缺少 `aaplot` conda 环境（Python 3.12）时创建它，通过 `env_check.py` 逐项核对 `requirements.txt` 里的包，用 `pip` 装上缺的，然后用该环境的解释器启动 `app.py`。`--no-install` 只报告检查结果，`--recreate` 重建环境，`AAPLOT_NO_PAUSE=1` 跳过最后的暂停（用于自动化）。
+两个启动器都会自检环境，通过 `env_check.py` 逐项核对 `requirements.txt`，安装缺失依赖，再用所管理环境的解释器启动 `app.py`。
+
+Windows 启动器使用名为 `aaplot` 的 conda 环境。macOS 启动器不依赖 conda：它寻找一个确实带 `tkinter` 的 Python 3.9+，在 `~/Library/Application Support/AAPlotFiberPretreatment/venv` 创建专用虚拟环境，用 `pip` 安装 `requirements.txt` 里的依赖，确认 Tk 与本地 `processing` 模块都能导入后才启动 `app.py`。`tkinter` 由解释器自带、pip 装不了，所以找不到可用 Python 时启动器会直接给出安装办法（`brew install python@3.12 python-tk@3.12`、python.org 安装包或 Miniforge）。conda 只在机器上找不到别的 Python 时自动兜底，也可用 `--conda` 显式选择；`--venv` 强制使用虚拟环境。`--no-install`（或 `--check`）只报告检查结果，`--recreate` 重建受管环境，`AAPLOT_NO_PAUSE=1` 跳过最后的暂停（用于自动化），`AAPLOT_VENV_DIR` 可移动 macOS 虚拟环境。若 pip 受网络限制，先 `export PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/` 再重跑。重建不会删除任何东西：旧环境留在新环境旁边，名为 `venv.old-<时间戳>`（约 300 MB），新环境确认可用后可自行删除。
+
+macOS 上仓库路径与虚拟环境路径都可以包含空格或中文，启动器对每个传入的路径都加了引号。错误信息会追加到 `~/Library/Logs/AAPlotFiberPretreatment/aaplot_errors.log`；Windows 与其他平台仍写在 `app.py` 同目录。
 
 ## 输入文件夹
 
@@ -192,7 +215,7 @@ marker 可在 **Data & Fitting** 标签页的 **Markers (Working Copy)** 里增�
 
 | 现象 | 原因与处理 |
 | --- | --- |
-| 应用或绘图时弹窗报错 | 完整 traceback 同时追加写入 `app.py` 同目录下的 `aaplot_errors.log`（只追加，不覆盖），把这个文件发过来即可。 |
+| 应用或绘图时弹窗报错 | 完整 traceback 会追加写入 `aaplot_errors.log`。macOS 下位于 `~/Library/Logs/AAPlotFiberPretreatment/`，其他平台仍放在 `app.py` 同目录；反馈问题时把该文件发过来即可。 |
 | 状态栏出现 `Series of different length were trimmed ...` | 有两条曲线以不同长度进入绘图；程序会截齐并上报，而不是中断重绘。通常是记录中有空单元格。 |
 | `6 cells in CH1-410 left as a gap` | 连续缺失超过 3 个采样点。曲线在那里保留缺口；若并非真实断信号，请在 `Fluorescence.csv` 里补齐或删除这些行。 |
 | 点 Apply 没反应 / 要求重新确认区间 | 数据范围、模型或基线模式的改动会令该通道已确认的拟合失效。只改 offset 和 baseline 不会。 |

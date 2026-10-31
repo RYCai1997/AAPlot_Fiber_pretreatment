@@ -50,14 +50,19 @@ PLOT_MISMATCHES: list[tuple[int, ...]] = []
 
 
 def record_error(text: str) -> Path | None:
-    """Append one traceback to a log beside the app so it can be reported."""
-    path = Path(__file__).with_name(ERROR_LOG_NAME)
-    try:
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}]\n{text.rstrip()}\n\n")
-        return path
-    except Exception:  # noqa: BLE001 - logging must never mask the original error
-        return None
+    """Append one traceback to a writable log without masking the original error."""
+    candidates = [Path(__file__).with_name(ERROR_LOG_NAME)]
+    if sys.platform == "darwin":
+        candidates.insert(0, Path.home() / "Library" / "Logs" / "AAPlotFiberPretreatment" / ERROR_LOG_NAME)
+    for path in candidates:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}]\n{text.rstrip()}\n\n")
+            return path
+        except Exception:  # noqa: BLE001 - logging must never mask the original error
+            continue
+    return None
 
 
 def install_callback_logger(root: Any) -> None:
@@ -1433,7 +1438,16 @@ class PretreatmentApp:
         def on_wheel(event: Any) -> None:
             if isinstance(event.widget, (tk.Listbox, tk.Text, ttk.Treeview)):
                 return  # these keep their own scrolling
-            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            delta = int(getattr(event, "delta", 0))
+            if delta == 0:
+                return
+            if sys.platform == "darwin":
+                units = -1 if delta > 0 else 1
+            else:
+                units = int(-delta / 120)
+                if units == 0:
+                    units = -1 if delta > 0 else 1
+            canvas.yview_scroll(units, "units")
 
         canvas.bind("<Enter>", lambda _event: canvas.bind_all("<MouseWheel>", on_wheel))
         canvas.bind("<Leave>", lambda _event: canvas.unbind_all("<MouseWheel>"))

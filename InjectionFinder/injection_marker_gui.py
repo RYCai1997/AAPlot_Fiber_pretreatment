@@ -24,6 +24,7 @@ import os
 import sys
 import csv
 import argparse
+import subprocess
 import threading
 import traceback
 import queue
@@ -54,6 +55,19 @@ FONT_CANDIDATES = [
     r"C:\Windows\Fonts\simsun.ttc",
 ]
 FONT_BOLD = r"C:\Windows\Fonts\msyhbd.ttc"
+
+
+def open_in_file_manager(path):
+    """Reveal a folder in Explorer, Finder or the desktop's file manager.
+
+    os.startfile is Windows-only; on macOS the attribute does not exist.
+    """
+    if sys.platform == "darwin":
+        subprocess.Popen(["open", str(path)])
+    elif os.name == "nt":
+        os.startfile(str(path))  # type: ignore[attr-defined]
+    else:
+        subprocess.Popen(["xdg-open", str(path)])
 
 ANALYSIS_FS = 10.0          # 重采样目标采样率 (Hz)
 DETREND_SEC = 300.0         # 去漂移滑动中位数窗长 (s)
@@ -679,7 +693,7 @@ def launch_gui():
         if messagebox.askyesno("完成", "注射候选窗 %.2f–%.2f min。\n打开输出目录？"
                                % (res["win"][0] / 60.0, res["win"][1] / 60.0)):
             try:
-                os.startfile(res["outdir"])
+                open_in_file_manager(res["outdir"])
             except Exception:
                 pass
 
