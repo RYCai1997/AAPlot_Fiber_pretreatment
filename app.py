@@ -4868,7 +4868,17 @@ class PretreatmentApp:
 def main() -> int:
     try:
         import tkinter as tk
-        root = tk.Tk(); PretreatmentApp(root); root.mainloop(); return 0
+        root = tk.Tk(); PretreatmentApp(root)
+        if sys.platform == "darwin":
+            # A Finder double-click starts this process from Terminal, so the
+            # window can open behind the terminal window and look like nothing
+            # happened.  Lift it once the window is mapped.
+            try:
+                root.lift()
+                root.after(150, root.focus_force)
+            except Exception:  # noqa: BLE001 - cosmetic only, never fatal
+                pass
+        root.mainloop(); return 0
     except Exception as exc:
         print(f"GUI failed to start: {exc}", file=sys.stderr); return 1
 

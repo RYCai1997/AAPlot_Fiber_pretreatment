@@ -60,6 +60,15 @@ VENV_DIR="${AAPLOT_VENV_DIR:-$DEFAULT_VENV}"
 
 # ---------------------------------------------------------------- helpers
 
+trace() {
+    # A Finder double-click can fail with only a fleeting Terminal window, so
+    # every run leaves a short trail here: which interpreter was picked and
+    # how app.py ended.  Without it a failed start leaves no evidence at all.
+    [ "${AAPLOT_NO_TRACE:-0}" = "1" ] && return 0
+    mkdir -p -- "$LOG_DIR" 2>/dev/null || return 0
+    printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOG_DIR/launcher.log" 2>/dev/null || true
+}
+
 pause_if_needed() {
     # A Finder double-click closes the Terminal window the moment the
     # script ends, so the user would never see an error message.
@@ -71,6 +80,7 @@ pause_if_needed() {
 
 finish() {
     _code=$1
+    trace "exit $_code"
     pause_if_needed
     exit "$_code"
 }
@@ -118,29 +128,13 @@ arch_of() {
 # with a minimal PATH it resolves to Apple's 3.9.6 with the deprecated Tk 8.5,
 # and it must not win over a python.org or Homebrew build found by full path.
 find_base_python() {
-    _probe_list="
-        python3.12
-        python3.13
-        python3.11
-        python3.10
-        python3.9
-        /Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13
-        /Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12
-        /Library/Frameworks/Python.framework/Versions/3.11/bin/python3.11
-        /Library/Frameworks/Python.framework/Versions/3.10/bin/python3.10
-        /opt/homebrew/bin/python3.13
-        /opt/homebrew/bin/python3.12
-        /opt/homebrew/bin/python3.11
-        /opt/homebrew/bin/python3.10
-        /usr/local/bin/python3.13
-        /usr/local/bin/python3.12
-        /usr/local/bin/python3.11
-        /usr/local/bin/python3.10
-        /opt/homebrew/bin/python3
-        /usr/local/bin/python3
-        python3
-    "
-    for name in $_probe_list; do
+    # One candidate per line, consumed with `read`.  `for name in $_list`
+    # would word-split under bash/sh but NOT under zsh, so when Terminal runs
+    # this file with the login shell the loop skipped every entry and fell
+    # straight through to the Apple Python.  A while-read loop behaves the
+    # same in both shells.
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
         case "$name" in
             /*) cand=$name ;;
             *)  cand=$(command -v "$name" 2>/dev/null || true) ;;
@@ -150,7 +144,28 @@ find_base_python() {
             printf '%s\n' "$cand"
             return 0
         fi
-    done
+    done <<'CANDIDATES'
+python3.12
+python3.13
+python3.11
+python3.10
+python3.9
+/Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13
+/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12
+/Library/Frameworks/Python.framework/Versions/3.11/bin/python3.11
+/Library/Frameworks/Python.framework/Versions/3.10/bin/python3.10
+/opt/homebrew/bin/python3.13
+/opt/homebrew/bin/python3.12
+/opt/homebrew/bin/python3.11
+/opt/homebrew/bin/python3.10
+/usr/local/bin/python3.13
+/usr/local/bin/python3.12
+/usr/local/bin/python3.11
+/usr/local/bin/python3.10
+/opt/homebrew/bin/python3
+/usr/local/bin/python3
+python3
+CANDIDATES
 
     # Last resort: the Apple system python (Tk 8.5).  Warn, but a working
     # window beats no window.
@@ -250,6 +265,8 @@ if [ ! -f "$REQ_FILE" ] || [ ! -f "$CHECK_PY" ] || [ ! -f "$APP_PY" ]; then
     printf '        requirements.txt, env_check.py and app.py must sit next to this script.\n' >&2
     finish 1
 fi
+
+trace "start pid=$$ dir=$SCRIPT_DIR sh=$0 args=[${*:-}] shell=${SHELL:-unknown}"
 
 printf '%s\n' '============================================================'
 printf ' %s - macOS environment check\n' 'AAPlot Fiber Pretreatment'
@@ -393,6 +410,7 @@ EOF
 fi
 
 printf '[env] interpreter  : %s (%s)\n' "$PY" "$(version_of "$PY")"
+trace "backend=$BACKEND base=$BASE_PY interpreter=$PY"
 
 # ------------------------------------------------------- dependency check
 
@@ -483,6 +501,8 @@ fi
 # ---------------------------------------------------------------- launch
 
 printf '\n[OK] Starting app.py with the managed %s environment...\n' "$BACKEND"
+printf '     The window takes a few seconds to appear - keep this Terminal\n'
+printf '     window open until it does.  Closing the window also stops the app.\n'
 printf '     Error log: %s/aaplot_errors.log\n\n' "$LOG_DIR"
 
 # Run from the repository folder so relative paths and `import processing`
@@ -492,8 +512,10 @@ cd -- "$SCRIPT_DIR" || {
     finish 1
 }
 
+trace "launching app.py"
 "$PY" "$APP_PY"
 APP_RC=$?
+trace "app.py rc=$APP_RC"
 if [ "$APP_RC" -ne 0 ]; then
     # Closing the window returns 0.  A signal such as SIGTERM (closing the
     # Terminal window, or "Force Quit") ends the Tk bundle with 1 and leaves
@@ -504,5 +526,6 @@ if [ "$APP_RC" -ne 0 ]; then
     else
         printf '       No traceback was recorded; a forced quit looks like this too.\n' >&2
     fi
+    printf '       Run history: %s/launcher.log\n' "$LOG_DIR" >&2
 fi
 finish "$APP_RC"
